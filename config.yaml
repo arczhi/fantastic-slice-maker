@@ -48,6 +48,9 @@ bgm:
 
 recall:
   candidates: 32
+  candidates_max: 96
+  min_gap: 6.0
+  cand_step: 10.0
   min_beat: 2.0
   max_beat: 8.0
   head_skip: 0.02

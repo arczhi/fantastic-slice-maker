@@ -104,7 +104,10 @@ class BGMCfg:
 
 @dataclass
 class RecallCfg:
-    candidates: int = 32
+    candidates: int = 32             # 候选数下限（短片也用满，NMS 自然收敛）
+    candidates_max: int = 96         # 上限，防止 prompt 过长
+    min_gap: float = 6.0             # 候选之间的最小间隔（秒），略粗于一个语义单元
+    cand_step: float = 10.0          # 每这么长素材就允许再多一个候选
     min_beat: float = 2.0
     max_beat: float = 8.0
     head_skip: float = 0.02          # 片头跳过比例

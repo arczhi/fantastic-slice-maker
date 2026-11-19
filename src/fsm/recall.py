@@ -115,8 +115,18 @@ def recall(units: list[dict], duration: float, cfg: RecallCfg,
     has_text = sum(1 for u in scored if u["has_text"])
     basis = "text" if has_text >= max(3, len(scored) * 0.25) else "visual"
 
-    gap = max(6.0, duration / max(8, cfg.candidates // 2))
-    picked = _nms(scored, min_gap=gap, limit=cfg.candidates)
+    # 候选密度必须跟时长挂钩。以前是 gap = duration / 16，11 分钟的片子
+    # 算出 42 秒间隔，整片只放得下 13 个候选，平均 52 秒才摸一下样本——
+    # 真正的高光只有十几秒，直接被 NMS 挤掉，模型只能在几个孤点上凑段子，
+    # 于是出现「hook 在 571 秒、setup 在 463 秒」这种拼不上的剪辑单。
+    #
+    # 改法：间隔固定成「略粗于一个语义单元」（min_gap），数量按时长放开
+    # （每 cand_step 秒一个），两头设上下限。注意间隔不能用被时长除出来的
+    # 大值——那会让短片反而比原来更粗，属于改出回归。
+    gap = cfg.min_gap
+    limit = int(max(cfg.candidates,
+                    min(cfg.candidates_max, duration / max(1.0, cfg.cand_step))))
+    picked = _nms(scored, min_gap=gap, limit=limit)
     picked.sort(key=lambda x: x["start"])
 
     for i, u in enumerate(picked):

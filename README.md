@@ -262,7 +262,12 @@ out/<日期>/        成片 + report.json + 总览页 index.html
 | 配置 | 默认 | 说明 |
 |---|---|---|
 | `planner.target_seconds` | 52 | 目标成片时长 |
-| `recall.candidates` | 32 | 候选数，调大给模型更多选择但费 token |
+| `planner.min_seconds` | 32 | 成片时长**硬下限**，低于它模型输出会被退回重试 |
+| `planner.max_seconds` | 95 | 时长上限，超过按角色顺序裁段 |
+| `recall.candidates` | 32 | 候选数下限（短片也保底这么多） |
+| `recall.candidates_max` | 96 | 候选数上限，防止给模型的 prompt 过长 |
+| `recall.min_gap` | 6.0 | 候选之间的最小间隔（秒），略粗于一个语义单元 |
+| `recall.cand_step` | 10.0 | 每这么多秒素材允许多一个候选，长片靠它维持密度 |
 | `render.preset` | veryfast | 编码速度，追求质量改 `medium` |
 | `ocr.fps` | 2.0 | 抽帧频率，降到 1.5 省 25% |
 | `bgm.enabled` | true | 关掉等于 `--no-bgm` |

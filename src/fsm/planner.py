@@ -34,7 +34,8 @@ TEMPLATE = """把下面这部漫剧剪成 {n_reels} 条竖屏切片，每条 {ta
 {candidates}
 
 每条切片的硬性要求：
-1. 从候选中选 4-7 段，总时长控制在 {min_s:.0f}-{max_s:.0f} 秒。
+1. 从候选中选 4-7 段，总时长必须落在 {min_s:.0f}-{max_s:.0f} 秒之间。
+   低于 {min_s:.0f} 秒的方案会被系统直接退回，宁可多选一段也不要交短片。
 2. 结构必须是：hook（前 3 秒就要抓人）→ setup → rise → climax → cliff（留悬念）。
 3. hook 要选冲突最凶、信息量最大的那一句，可以来自片中任意位置，不必是开头。
 4. 每段 4-12 秒，必须完整包含至少一句台词，不要切在半句话上。
@@ -149,7 +150,15 @@ def _validate(plan: dict, cands: list[dict], cfg: PlannerCfg) -> list[dict]:
             continue
         i = max(c["start"], min(i, c["end"] - 1.0))
         o = min(c["end"], max(o, i + 1.0))
-        if o - i < 1.5:
+        # prompt 要求每段 4-12 秒，但模型经常交出 3 秒的碎段——那种段子放进
+        # 成片就是一闪而过，观众还没反应过来就切走了。这里在候选区间内往回
+        # 补足到 3.5 秒；候选本身就太短（2 秒的空镜）则放弃这一段。
+        min_beat = 3.5
+        if o - i < min_beat:
+            o = min(c["end"], i + min_beat)
+            if o - i < min_beat:
+                i = max(c["start"], o - min_beat)
+        if o - i < 2.5:
             continue
         used.add(cid)
         role = str(b.get("role") or "rise")
@@ -165,13 +174,29 @@ def _validate(plan: dict, cands: list[dict], cfg: PlannerCfg) -> list[dict]:
     return beats
 
 
-def _accept(beats: list[dict], cfg: PlannerCfg, n_cands: int = 99) -> tuple[bool, str, float]:
+def _accept(beats: list[dict], cfg: PlannerCfg,
+            cands: list[dict] | None = None) -> tuple[bool, str, float]:
+    """校验一条切片能否交付。返回 (ok, 驳回原因, 实测总时长)。
+
+    下限必须真的卡在 min_seconds 上。之前写成 min_seconds * 0.6（32s 的配置
+    实际只卡 19.2s），模型交 27 秒的片子也能过——投到抖音上根本铺不满一个
+    完整的高光弧，观众刚看出味就结束了。
+
+    但也不能一刀切：预告/花絮这类素材的候选池本身就只有十几秒，硬卡 32 秒
+    会永远交不出片。所以候选池不够长时按可用时长折算。
+    """
     total = sum(b["dur"] for b in beats)
-    min_beats = min(3, n_cands)   # 短素材（预告/花絮）可能只够 2 段
+    n_cands = len(cands) if cands else 99
+    min_beats = min(3, n_cands)   # 短素材可能只够 2 段
     if len(beats) < min_beats:
         return False, f"only {len(beats)} beats (need {min_beats})", total
-    if total < cfg.min_seconds * 0.6:
-        return False, f"total {total:.0f}s too short", total
+
+    floor = cfg.min_seconds
+    if cands:
+        avail = sum(c["dur"] for c in cands)
+        floor = min(floor, avail * 0.85)
+    if total < floor:
+        return False, f"total {total:.0f}s < {floor:.0f}s", total
     return True, "", total
 
 
@@ -253,12 +278,25 @@ def plan(cands: list[dict], cfg: PlannerCfg, n_reels: int = 2) -> dict:
             min_s=cfg.min_seconds, max_s=cfg.max_seconds,
             candidates=_fmt_candidates(cands),
         )
+        # 被驳回时把原因回灌给模型再试一次。原样重发 prompt 只会让它重复
+        # 同样的错误——实测三次都用同一个偏短的方案，最后白烧三次调用。
+        feedback: list[str] = []
         for attempt, temp in enumerate((cfg.temperature, 0.5, 0.3), start=1):
+            messages = [
+                {"role": "system", "content": SYSTEM},
+                {"role": "user", "content": prompt},
+            ]
+            if feedback:
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "上一版被驳回，原因：\n"
+                        + "\n".join(f"- {f}" for f in feedback)
+                        + "\n请针对这些原因修正，重新输出完整的 JSON（reels 数组）。"
+                    ),
+                })
             try:
-                raw = _post(cfg, [
-                    {"role": "system", "content": SYSTEM},
-                    {"role": "user", "content": prompt},
-                ], temp)
+                raw = _post(cfg, messages, temp)
                 parsed = _parse(raw)
 
                 raw_reels = parsed.get("reels")
@@ -266,13 +304,15 @@ def plan(cands: list[dict], cfg: PlannerCfg, n_reels: int = 2) -> dict:
                     raw_reels = [parsed]
 
                 reels: list[dict] = []
+                reasons: list[str] = []
                 for item in raw_reels:
                     if not isinstance(item, dict):
                         continue
                     beats = _validate(item, cands, cfg)
-                    ok, why, total = _accept(beats, cfg, len(cands))
+                    ok, why, total = _accept(beats, cfg, cands)
                     if not ok:
                         log.warning(f"reel rejected: {why}")
+                        reasons.append(why)
                         continue
                     if total > cfg.max_seconds * 1.35:
                         beats = _trim(beats, cfg.max_seconds)
@@ -292,7 +332,8 @@ def plan(cands: list[dict], cfg: PlannerCfg, n_reels: int = 2) -> dict:
                     )
                     return {"strategy": "llm", "reels": reels,
                             "elapsed": round(time.time() - t0, 2)}
-                raise PlannerError("no valid reel in response")
+                feedback = reasons or ["没有任何一条切片通过校验"]
+                raise PlannerError("no valid reel in response: " + "; ".join(feedback[:3]))
             except PlannerError as e:
                 log.warning(f"plan attempt {attempt} rejected: {e}")
             except Exception as e:
