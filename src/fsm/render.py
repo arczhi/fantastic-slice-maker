@@ -111,11 +111,14 @@ def order_beats(beats: list[dict]) -> list[dict]:
 def render(
     src: str, beats: list[dict], work_dir: Path, cfg: RenderCfg,
     *, has_audio: bool = True, tag: str = "reel",
+    src_size: tuple[int, int] | None = None,
 ) -> dict:
     """各段独立切片并行渲染。
 
     x264 自己就吃多核，所以并发 3 段 + 每段限 3 线程，比串行快 2 倍以上，
     又不会把 10 核机器打满导致 ASR 阶段饿死。
+
+    src_size 传源画面宽高，用来判断竖屏源是否值得建模糊层（见 ffmpeg.cut）。
     """
     from concurrent.futures import ThreadPoolExecutor
 
@@ -136,6 +139,8 @@ def render(
             # 自动补的字幕挂在 beat 上（pipeline 已按最终顺序算好段内时间）
             subs=b.get("subs"),
             threads=cfg.threads,
+            src_size=src_size,
+            blur_div=cfg.blur_div,
         )
         log.info(f"  clip {i}: {b['role']:7s} {b['start']:.1f}-{b['end']:.1f}s -> {dst.name}")
         return dst

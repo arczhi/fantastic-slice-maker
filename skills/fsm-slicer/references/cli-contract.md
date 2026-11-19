@@ -258,6 +258,7 @@ render:
   blur_sigma: 24
   audio_bitrate: 192k
   threads: 3              # 单段 x264 线程数，与 workers 相乘别超核数
+  blur_div: 4             # 模糊层在 1/N 分辨率上做再放大；1=全分辨率（更耗 CPU）
 
 output:                   # 出片数量与跨套去重
   reels: 2

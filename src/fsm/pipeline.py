@@ -239,6 +239,7 @@ def process(
                 rendered = render.render(
                     str(video), beats, work / f"v{v:02d}" / f"reel{i:02d}", cfg.render,
                     has_audio=info.has_audio, tag=f"v{v:02d}_reel_{i:02d}",
+                    src_size=(info.width, info.height),
                 )
         except ffmpeg.FFmpegError as e:
             log.warning(f"[{vid}] render v{v}-{i} failed: {e}")

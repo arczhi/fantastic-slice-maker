@@ -147,6 +147,7 @@ class RenderCfg:
     audio_bitrate: str = "192k"
     timeout: int = 900
     threads: int = 3                 # 单段裁切的 x264 线程数，与 workers 相乘别超过核数
+    blur_div: int = 4                # 模糊层在 1/blur_div 分辨率上做再放大（4≈肉眼看不出差别）
 
 
 @dataclass
