@@ -129,8 +129,12 @@ def run(
             initargs=(cfg.resource.nice,),
         ) as pool:
             pending: dict = {}
-            for t in it:
-                if len(pending) >= workers:
+            # 预热只取 workers 个任务。注意必须用 next() 取，不能写成
+            # for t in it: if len(pending) >= workers: break —— 那样会把
+            # 恰好第 workers+1 个任务取出后丢弃，整批少跑一部。
+            for _ in range(min(workers, len(tasks))):
+                t = next(it, None)
+                if t is None:
                     break
                 pending[pool.submit(_worker, t)] = t
             while pending:
