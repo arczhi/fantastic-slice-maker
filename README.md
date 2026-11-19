@@ -14,7 +14,7 @@
 视频
  ├─ 四路信号（并行）
  │   ├─ 镜头切分     pyscenedetect AdaptiveDetector（ffmpeg scene 兜底）
- │   ├─ ASR          FunASR Paraformer → 字符级时间戳 → 切句
+ │   ├─ ASR          SenseVoice-Small → 字符级时间戳 → 切句（附情感/音频事件）
  │   ├─ 字幕 OCR     PP-OCRv4 → 画面硬字幕 + 时间
  │   └─ 视觉         帧差运动 / 中心度 / 亮度 / 空镜判定
  ├─ 结构化时间轴     多路对齐到 shot，合并成语义单元
@@ -42,7 +42,13 @@ export DEEPSEEK_API_KEY=sk-你的key
 
 成片在 `out/<日期>/<video_id>/`，同目录有 `report.json` 和封面。
 
-`doctor` 里 `FunASR env`、`PP-OCR` 两行显示 missing 也能跑：ASR 缺失时自动用 OCR 字幕替代，OCR 缺失时用 ASR 台词替代，两路都缺失退化为纯视觉选片。想加 ASR 就装 FunASR（需要独立的 py3.9 环境），并用 `FUNASR_PYTHON` 或 `asr.python` 指过去。
+`doctor` 里 `FunASR env`、`PP-OCR` 两行显示 missing 也能跑：ASR 缺失时自动用 OCR 字幕替代，OCR 缺失时用 ASR 台词替代，两路都缺失退化为纯视觉选片。想加 ASR 就装 FunASR（需要独立的 py3.9 环境），并用 `FUNASR_PYTHON` 或 `asr.python` 指过去。默认引擎 SenseVoice 需要先拉一次权重（约 900MB）：
+
+```bash
+~/coding/FunASR/.venv/bin/python -c "from modelscope import snapshot_download; snapshot_download('iic/SenseVoiceSmall')"
+```
+
+没拉也能跑——会自动回退到 `paraformer`，只是慢一倍、没有情感标签。
 
 不写代码也想调参数，就在仓库根放一个 `config.local.yaml`（已 gitignore），只写差异：
 
@@ -177,7 +183,13 @@ export DEEPSEEK_API_KEY=sk-...
 **跑批按设备资源调度，而不是按任务数量**
 并发上限 = min(核数/3, 可用内存/2.5GB)，再被 `--workers` 压一层。每完成一部才补下一部，补之前检查实时负载与可用内存，越线就暂停（最长等 180 秒后放行，避免死等）。子进程 `nice 5`，单段 x264 限 3 线程。目标是「跑批时机器还能正常用」，不是「最快跑完」。
 
+**编码器分两个池，不是一个池**
+硬编（VideoToolbox）走媒体引擎、几乎不占 CPU，软编（x264）吃 CPU，两者抢的不是同一种资源，可以同时开：一条切片的多个片段按共享队列动态取活，GPU 池和 CPU 池各自消费，谁空出来谁拿下一段。实测混合能到 23.6 条/分钟，纯软编 3 路 21.7。另有两点反直觉：硬编的媒体引擎是**串行**的（1 路 11.6、6 路 11.9 条/分钟，加并发不涨），所以 `gpu_slots` 开大没意义；硬编画质其实更好（同一素材 SSIM 0.9947 / 3.2 Mbps vs x264 ultrafast 0.9925 / 5.2 Mbps），因为它判断内容不需要那么高码率时会主动省。
+
 阈值是 `max_load_per_core`（每核平均负载）而不是核数：默认 1.2，10 核机器上相当于 load1 ≈ 12 才拦。之所以卡在 1.2，是因为渲染本身就吃核——单条 45 秒切片实测等效 5.9 核（`-threads 3` 只限 x264，滤镜图默认按核数开线程），3 个 worker 并行就是 17.7 核的需求压在 10 核上，不拦就会一路 swap 到卡死。降低渲染的核占用比调阈值更有效，见下面的「模糊层按需降级」。
+
+**信号层的三路并发也要分配核数**
+ASR 子进程、OCR 的 ONNX、视觉帧差三路是**并行**跑的，如果都按核数开线程，加起来远超物理核数，结果是全部变慢。实测 OCR 单独跑 42 秒、进流水线后变 170-210 秒，差的 3 倍全耗在抢核上。现在按配额走：ASR 4 核 + OCR 3 核 + 视觉 2 核 ≈ 9 核，留一核给主进程和 IO。
 
 **源片没字幕时自动补**
 部分短剧不带内嵌字幕（实测《少夫人来自东北3》OCR 覆盖率只有 3.3%，有字幕的片子都在 20% 以上）。补不补按**覆盖率**判定而不是条数：无字幕片里 OCR 仍会零星抓到台标、集数标题和「恭喜少夫人」这类画面文字，按条数判断会误以为是字幕。
@@ -187,10 +199,18 @@ export DEEPSEEK_API_KEY=sk-...
 没有用 ffmpeg 的 `subtitles` / `drawtext`：Homebrew 的 ffmpeg 8.1 是精简构建（`--enable-libass` / `--enable-libfreetype` 都没有），这两个滤镜根本不存在。改成 PIL 渲染透明 PNG + `overlay` 链，与切片同一次编码完成（不二次压缩），时间轴用**段内相对时间**，不受多段拼接的偏移累积影响。
 
 **OCR 用 PP-OCRv4 而不是 Unlimited-OCR**
-Unlimited-OCR 是 3B MoE 文档模型，最佳部署是 vLLM + CUDA。按 0.5 秒一帧处理一天几十小时素材是小时级开销。字幕只是白字黑边的台词条，PP-OCRv4 det+rec ONNX 单帧约 90ms。另外两个实测结论：裁字幕带反而更慢（det 会把小图放大到固定边长），所以送整帧再按框位置过滤；相邻帧字幕不变时复用上次结果，实际引擎调用量约为总帧数的 20-40%。
+Unlimited-OCR 是 3B MoE 文档模型，最佳部署是 vLLM + CUDA。按 0.5 秒一帧处理一天几十小时素材是小时级开销。字幕只是白字黑边的台词条，PP-OCRv4 det+rec ONNX 单帧约 45-65ms。另外两个实测结论：裁字幕带反而更慢（det 会把小图放大到固定边长），所以送整帧再按框位置过滤；相邻帧字幕不变时复用上次结果。
 
-**ASR 走常驻服务**
+**但别指望这个复用能省多少**：短剧字幕在 2fps 下几乎每帧都在变，实测门控命中率 96%（922/960 次引擎调用），基本形同虚设。OCR 真正的浪费不在门控，而在**线程**：ONNX 默认按核数开 intra-op 线程会占到 5.8 个核，而它实际有效并行度没那么高——限到 `threads: 3` 只慢 3%，却降回 3.5 个核。三路信号是并行的，这个配额必须给，否则 OCR 会把 ASR 的核抢走。
+
+**ASR 走常驻服务，默认 SenseVoice**
 `AutoModel` 单次加载约 73 秒，推理 4 分钟音频只要 13 秒。每部剧各加载一次会白烧半小时。服务（`scripts/asr_server.py`）只加载一次，batch 期间所有剧共用。
+
+默认引擎是 `sensevoice`（SenseVoice-Small，230M 非自回归）。480 秒素材实测 68 秒出结果，比 `paraformer`（SeACo-Paraformer large，106–148 秒）快一倍多，代价是它只吐一整段文本、要自己按标点切句。换来的东西更值钱：**它同时给出情感与音频事件标签**（`<|ANGRY|>` / `<|HAPPY|>` / `<|BGM|>`），召回打分直接拿这个找冲突点，比纯词表准。要回到原生句级时间戳就设 `asr.engine: paraformer`。
+
+两个容易踩的坑：
+- **必须配 VAD**。不配时整片被当成一段、只转写开头几秒（实测 26 字 vs 1457 字）。
+- **`ncpu` 不是越大越好**：`ncpu=4`（=性能核数）68 秒，`ncpu=8` 反而 155 秒——多出来的线程被调度到能效核上互相等。默认 `ncpu: 0` 会自动取性能核数。
 
 **切点吸附镜头边界**
 ASR 给的是「这句话 12.4-15.8s」，但观众感知的是镜头。切在句子边界但镜头中间，会切在人脸或动作一半。`render.snap_to_shots` 只往更靠内吸附，只会让片段略长，不会切掉台词。
@@ -219,13 +239,15 @@ ASR 给的是「这句话 12.4-15.8s」，但观众感知的是镜头。切在�
 | 10 部短剧（素材共 549s）冷启动整批 | 694s（含 ASR 模型加载 74.7s） |
 | 单部 4 分钟剧，冷启动 | 约 160s |
 | 单部 1 分钟剧，冷启动 | 约 90s |
-| 阶段中位耗时 | ASR 58.6s / OCR 91.6s / 镜头+运动 20.9s / 出单 2.6s / 渲染 29.7s / 混音 4.3s |
-| 渲染速度 | 1080×1920 veryfast，单条 45s 成片约 6-9s（0.15-0.2 倍成片时长） |
+| 阶段耗时（480s 素材，改引擎后实测） | ASR 125s（服务端转写 96s）/ OCR 68s / 镜头+运动 17s / 出单 4.3s / 渲染 10.2s / 混音 5.7s |
+| 渲染速度 | 1080×1920 ultrafast，单条 45s 成片约 3-4s（0.07-0.09 倍成片时长） |
 | 单条切片 CPU 占用 | 25.9-37.0 CPU 秒（等效 3.5-4.3 核），内存峰值 430MB |
 
 **吞吐大致等于 0.8-1.3 倍素材总时长**，短素材偏高（固定开销摊不开），长素材偏低。10 小时满载约能处理 400-500 分钟素材。
 
-瓶颈顺序：OCR ≈ ASR > 渲染 > 镜头切分 > DeepSeek。DeepSeek 只占单部 2-6 秒，加机器没用；想提速先动 OCR 抽帧率（`ocr.fps` 从 2 降到 1.5 省 25%）和 ASR 环境（换 GPU 或 funasr-onnx）。
+瓶颈顺序：ASR > OCR > 渲染 > 镜头切分 > DeepSeek。改引擎后的实测收益：OCR 210s → 68s（线程限核），ASR 149s → 125s（SenseVoice + 性能核数），渲染 33-79s → 16s（ultrafast + 硬软双编码器池）。
+
+导出侧还有一条没走完的路：硬编（VideoToolbox）画质其实**更好**且体积更小——同一段素材 SSIM 0.9947 / 3.2 Mbps，而 x264 ultrafast crf22 是 0.9925 / 5.2 Mbps。但硬编的媒体引擎是串行的（实测 1 路 11.6 条/分钟、6 路 11.9 条/分钟，加并发不涨），所以 `gpu_slots` 开大没有意义，它只适合当第二个资源池和 CPU 并行用。
 
 ## 适用范围与限制
 
@@ -261,8 +283,8 @@ src/fsm/
   digest.py        每日总览页
   cli.py           命令行
 scripts/
-  asr_server.py    FunASR 常驻服务（用 FunASR 自己的 venv 跑）
-  asr_worker.py    一次性转写（服务不可用时回退）
+  asr_server.py    FunASR 常驻服务（用 FunASR 自己的 venv 跑），支持双引擎
+  asr_worker.py    一次性转写（服务不可用时回退），`--engine sensevoice|paraformer`
   build_bgm_lib.py 构建本地 BGM 库（下载 + BPM/beat 分析 + 索引）
 skills/
   fsm-slicer/      Agent skill：把整条流水线封装成可直接加载的操作手册
@@ -304,7 +326,12 @@ out/<日期>/        成片 + report.json + 总览页 index.html
 | `subtitle.coverage_threshold` | 0.12 | OCR 字幕覆盖率低于此值视为源片无字幕 |
 | `subtitle.max_chars` | 15 | 单行最多字数（中文按 1、ASCII 按 0.5 计宽） |
 | `subtitle.size` | 58 | 字号（1080 宽画布） |
-| `render.preset` | veryfast | 编码速度，追求质量改 `medium` |
+| `render.preset` | ultrafast | 批量出片优先速度；要画质改 veryfast/superfast（crf 各自加 2） |
+| `render.crf` | 22 | 与 preset 配套，ultrafast 下 22 约等于 veryfast 的 20 |
+| `render.encoder` | auto | `auto` = 硬编+软编双池 / `libx264` / `h264_videotoolbox` |
+| `render.cpu_slots` | 2 | 软编（x264）并发槽位，吃 CPU |
+| `render.gpu_slots` | 2 | 硬编并发槽位，走媒体引擎不占 CPU |
+| `render.vt_bitrate` | 6M | 硬编目标码率（硬编只能定码率；实测常打不满，体积反而更小） |
 | `render.threads` | 3 | 单段 x264 线程数，与并发数相乘别超核数 |
 | `render.blur_div` | 4 | 模糊层在 1/N 分辨率上做再放大，1 = 全分辨率（更耗 CPU） |
 | `output.per_plan` | 3 | 指定总条数时单套最多几条（一次要 4 条以上模型会开始凑数） |
@@ -314,6 +341,9 @@ out/<日期>/        成片 + report.json + 总览页 index.html
 | `resource.max_load_per_core` | 1.2 | 负载红线，越线暂停派活 |
 | `resource.min_free_mem_gb` | 3.0 | 可用内存红线 |
 | `ocr.fps` | 2.0 | 抽帧频率，降到 1.5 省 25% |
+| `ocr.threads` | 3 | ONNX 线程配额。不限会占 5.8 核；限到 3 只慢 3% 却省 40% CPU |
+| `asr.engine` | sensevoice | `sensevoice` 快一倍且带情感标签；`paraformer` 给原生句级时间戳 |
+| `asr.ncpu` | 0 | 0 = 自动取性能核数。SenseVoice 超过性能核数反而变慢 |
 | `bgm.enabled` | true | 关掉等于 `--no-bgm` |
 | `workers` | 3 | 同时处理的剧数 |
 

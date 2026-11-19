@@ -5,8 +5,15 @@ asr:
   # FunASR 依赖 py3.9，通常单独建 venv。留空则自动探测
   # ~/coding/FunASR/.venv/bin/python，也可用环境变量 FUNASR_PYTHON 指定
   python: ""
+  # sensevoice: 230M 非自回归，480s 素材 68s（paraformer 要 106-148s），
+  #             还会附带情感/音频事件标签，用来找冲突点
+  # paraformer: SeACo-Paraformer large，原生句级时间戳，作为对照与兜底
+  engine: sensevoice
   model: paraformer-zh
   device: cpu
+  # 0 = 自动取性能核数（M5 是 4）。SenseVoice 超过性能核数反而变慢：
+  # 实测 4 线程 68s、8 线程 155s
+  ncpu: 0
   batch_size_s: 120
   timeout: 1800
 
@@ -22,6 +29,10 @@ ocr:
   band_top: 0.42
   change_threshold: 5.0
   min_confidence: 0.55
+  det_limit_side_len: 480   # 检测输入长边，默认 736；降到 480 快一倍且字幕仍准确
+  # ONNX 线程配额。默认按核数开会占到 5.8 个核，限到 3 是 3.5 个核、
+  # 墙钟只慢 3%。三路信号并行时必须限，否则会抢 ASR 的核
+  threads: 3
 
 vision:
   fps: 4.0
@@ -96,11 +107,17 @@ render:
   width: 1080
   height: 1920
   fps: 30
-  crf: 20
-  preset: veryfast
+  crf: 22
+  preset: ultrafast       # 批量出片优先速度；要画质改 veryfast/superfast（各自加 crf 2）
   loudness_i: -14
   blur_sigma: 24
   audio_bitrate: 192k
+  # 编码资源池：硬编走媒体引擎、软编吃 CPU，两者不抢同一种资源，可同时开。
+  # 实测 45s 切片：软编 2 槽 + 硬编 2 槽 ≈ 23.6 条/分钟，纯软编 3 槽 21.7。
+  encoder: auto           # auto | libx264 | h264_videotoolbox
+  cpu_slots: 2
+  gpu_slots: 2
+  vt_bitrate: 6M          # 硬编只能定码率，画质随内容波动
 
 # 自动补字幕：源片没有内嵌字幕时（OCR 字幕覆盖率低），用 ASR 句子生成字幕烧进成片。
 # 本机 ffmpeg 是精简构建（无 libass），所以走 PIL 渲染 PNG + overlay，

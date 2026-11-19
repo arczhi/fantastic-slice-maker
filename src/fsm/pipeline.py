@@ -113,7 +113,7 @@ def process(
     # ---------------------------------------------------------------- 时间轴
     tl = read_json(work / "timeline.json") if book.ok("timeline") and not force else None
     if tl is None:
-        with book.run("timeline"):
+        with book.run("timeline", force=force):
             tl = timeline.build(shots, vis, sentences, strips, info, cfg.recall)
             atomic_write_json(work / "timeline.json", tl)
     units = tl.get("units") or []
@@ -387,11 +387,11 @@ def _signals(video, info, work: Path, book: StageBook, cfg: Config, force: bool)
     def run_shots_vision():
         try:
             if not (book.ok("shots") and not force):
-                with book.run("shots"):
+                with book.run("shots", force=force):
                     sh = shots_sig.detect(str(video), info.duration, cfg.vision)
                     atomic_write_json(work / "shots.json", [s.to_dict() for s in sh])
             if not (book.ok("vision") and not force):
-                with book.run("vision"):
+                with book.run("vision", force=force):
                     v = vision_sig.analyze(str(video), info.duration, cfg.vision)
                     atomic_write_json(work / "vision.json", v)
         except Exception as e:
@@ -412,16 +412,18 @@ def _signals(video, info, work: Path, book: StageBook, cfg: Config, force: bool)
             atomic_write_json(work / "asr.json", {"ok": False, "sentences": []})
             return
         try:
-            with book.run("asr"):
+            with book.run("asr", force=force):
                 raw = asr_sig.transcribe(audio, work / "asr_raw.json", cfg.asr)
                 sents = []
                 if raw.get("ok"):
                     sents = asr_sig.split_sentences(
-                        raw.get("text", ""), raw.get("timestamp", []), info.duration
+                        raw.get("text", ""), raw.get("timestamp", []),
+                        info.duration, raw.get("emotions"),
                     )
                 atomic_write_json(work / "asr.json", {
                     "ok": bool(raw.get("ok")), "error": raw.get("error"),
                     "sentences": sents, "char_count": len(raw.get("text", "")),
+                    "engine": raw.get("engine"),
                 })
                 if not raw.get("ok"):
                     raise RuntimeError(raw.get("error", "asr failed"))
@@ -437,7 +439,7 @@ def _signals(video, info, work: Path, book: StageBook, cfg: Config, force: bool)
         if book.ok("ocr") and not force:
             return
         try:
-            with book.run("ocr"):
+            with book.run("ocr", force=force):
                 strips = ocr_sig.extract(str(video), cfg.ocr, info.duration)
                 atomic_write_json(work / "ocr.json", {"ok": True, "strips": strips})
         except Exception as e:
@@ -471,7 +473,7 @@ def _blacks(video: Path, work: Path, book: StageBook, force: bool) -> list[tuple
     if book.ok("blacks") and not force and path.exists():
         return [tuple(x) for x in (read_json(path, []) or [])]
     try:
-        with book.run("blacks"):
+        with book.run("blacks", force=force):
             found = ffmpeg.detect_black(str(video))
             atomic_write_json(path, [list(x) for x in found])
             return found

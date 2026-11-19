@@ -14,7 +14,7 @@ from pathlib import Path
 import requests
 
 from ..config import PROJECT_ROOT, ASRCfg
-from ..util import get_logger, read_json
+from ..util import atomic_write_json, get_logger, read_json
 
 log = get_logger("asr")
 
@@ -44,8 +44,16 @@ def ensure_server(cfg: ASRCfg, log_dir: str | Path | None = None) -> bool:
     global _proc
     if not cfg.use_server:
         return False
-    if health(cfg):
-        return True
+    h = health(cfg)
+    if h:
+        # 常驻服务可能还挂着上一个引擎。切了 engine 却不重启，就会一直
+        # 用旧模型的输出（字段也对不上，很难发现），所以这里主动比对。
+        running = h.get("engine")
+        if running and running != cfg.engine:
+            log.info(f"ASR server engine changed ({running} -> {cfg.engine}), restarting")
+            stop_server(cfg)
+        else:
+            return True
 
     py = Path(cfg.python).expanduser()
     server = Path(cfg.server).expanduser()
@@ -59,7 +67,8 @@ def ensure_server(cfg: ASRCfg, log_dir: str | Path | None = None) -> bool:
     try:
         _proc = subprocess.Popen(
             [str(py), str(server), "--port", str(cfg.server_port),
-             "--ncpu", str(cfg.ncpu), "--device", cfg.device, "--preload"],
+             "--ncpu", str(cfg.ncpu), "--device", cfg.device,
+             "--engine", cfg.engine, "--preload"],
             stdout=fh, stderr=subprocess.STDOUT, cwd=str(server.parent.parent),
         )
     except OSError as e:
@@ -106,7 +115,12 @@ def _via_server(audio: Path, out_json: Path, cfg: ASRCfg) -> dict | None:
         return None
     if data.get("ok"):
         data["source"] = "server"
-        _write_json(out_json, data)
+        # 缓存写失败不能连累结果：宿主可能把 rename 建模成删除而拒绝授权，
+        # 那只是少了断点续跑的缓存，转写本身是成功的，必须照常返回。
+        try:
+            _write_json(out_json, data)
+        except OSError as e:
+            log.warning(f"ASR cache write skipped ({type(e).__name__}): {e}")
     return data
 
 
@@ -132,7 +146,7 @@ def transcribe(audio: str | Path, out_json: str | Path, cfg: ASRCfg) -> dict:
     cmd = [
         str(py), str(worker), "--audio", str(audio), "--out", str(out_json),
         "--device", cfg.device, "--batch-size-s", str(cfg.batch_size_s),
-        "--ncpu", str(cfg.ncpu),
+        "--engine", cfg.engine, "--ncpu", str(cfg.ncpu),
     ]
     log.info(f"ASR start (subprocess): {audio.name}")
     try:
@@ -151,24 +165,30 @@ def transcribe(audio: str | Path, out_json: str | Path, cfg: ASRCfg) -> dict:
 
 
 def _write_json(path: Path, data: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-    tmp.replace(path)
+    """走统一的原子写，它已经处理了「rename 被宿主拦截」的降级。"""
+    atomic_write_json(path, data)
 
 
-def split_sentences(text: str, timestamps: list, duration: float) -> list[dict]:
+def split_sentences(
+    text: str, timestamps: list, duration: float,
+    emotions: list[dict] | None = None,
+) -> list[dict]:
     """按标点切句，并把「第 k 个正文字符」映射到时间戳。
 
     FunASR 的 timestamp 是字符级且不含标点，长度常与正文差 1-2 个
     （英文词被合并、数字被合并）。这里用比例映射而非严格对齐，
     位置误差最多一两个字，对切片边界完全够用。
+
+    emotions 是 SenseVoice 的段级标注 [{at: 字符索引, emotion, event}]。
+    按每句的起始字符索引认领，不能整段共用一个标签——同一段话里
+    完全可能前半句愤怒、后半句平静。
     """
     if not text.strip():
         return []
     if not timestamps:
-        return [{"text": text.strip(), "start": 0.0,
-                 "end": round(duration, 3), "chars": len(text)}]
+        return _attach_emotions([{"text": text.strip(), "start": 0.0,
+                                  "end": round(duration, 3), "chars": len(text),
+                                  "k0": 0}], emotions)
 
     n_ts = len(timestamps)
     n_content = sum(1 for c in text if c not in PUNCT)
@@ -203,6 +223,7 @@ def split_sentences(text: str, timestamps: list, duration: float) -> list[dict]:
                     "start": round(start_ms / 1000.0, 3),
                     "end": round(max(end_ms / 1000.0, start_ms / 1000.0 + 0.25), 3),
                     "chars": sum(1 for c in body if c not in PUNCT),
+                    "k0": k0,
                 })
             buf = []
             k0 = k
@@ -216,6 +237,7 @@ def split_sentences(text: str, timestamps: list, duration: float) -> list[dict]:
             "start": round(start_ms / 1000.0, 3),
             "end": round(max(end_ms / 1000.0, start_ms / 1000.0 + 0.25), 3),
             "chars": sum(1 for c in tail if c not in PUNCT),
+            "k0": k0,
         })
 
     merged: list[dict] = []
@@ -229,7 +251,30 @@ def split_sentences(text: str, timestamps: list, duration: float) -> list[dict]:
             prev["end"] = max(prev["end"], s["end"])
         else:
             merged.append(s)
-    return merged
+    return _attach_emotions(merged, emotions)
+
+
+def _attach_emotions(sentences: list[dict], emotions: list[dict] | None) -> list[dict]:
+    """把 SenseVoice 的段级情感按字符位置挂到每句上。
+
+    标注按 at 升序，找「at <= 本句起点」的最后一个即可；找不到说明这句
+    在第一个标注之前，沿用第一个（模型至少会吐一个段级标签）。
+    k0 是内部用的字符索引，挂完就删，不写进 asr.json。
+    """
+    marks = sorted(emotions or [], key=lambda m: m.get("at", 0))
+    for s in sentences:
+        k0 = s.pop("k0", 0)
+        if not marks:
+            continue
+        hit = marks[0]
+        for m in marks:
+            if m.get("at", 0) <= k0:
+                hit = m
+            else:
+                break
+        s["emotion"] = hit.get("emotion", "")
+        s["event"] = hit.get("event", "")
+    return sentences
 
 
 def clean_text(t: str) -> str:

@@ -29,7 +29,14 @@ def _load_engine(cfg: OCRCfg):
         raise NotImplementedError(f"ocr backend '{cfg.backend}' not wired yet")
     from rapidocr_onnxruntime import RapidOCR
 
-    kwargs: dict[str, Any] = {}
+    kwargs: dict[str, Any] = {
+        # det 是 OCR 的大头（实测 84/107 ms）。把检测输入的长边从默认 736
+        # 降到 480，单帧 118 → 65 ms，字幕文本仍能正确识别。
+        "det_limit_side_len": cfg.det_limit_side_len,
+        # 限线程：默认会吃到 5.8 个核，限到 3 后 3.5 核而墙钟只慢 3%。
+        # 三路信号并行时这是必须的，否则 OCR 会把 ASR 的核抢走。
+        "intra_op_num_threads": max(1, cfg.threads),
+    }
     for key, path in (
         ("det_model_path", cfg.det_model),
         ("rec_model_path", cfg.rec_model),
@@ -37,11 +44,17 @@ def _load_engine(cfg: OCRCfg):
     ):
         if path and Path(path).expanduser().exists():
             kwargs[key] = str(Path(path).expanduser())
-    if len(kwargs) < 2:
+    if len(kwargs) < 4:
         log.warning("local PP-OCR models missing, falling back to bundled defaults")
-        kwargs = {}
+        kwargs = {
+            "det_limit_side_len": cfg.det_limit_side_len,
+            "intra_op_num_threads": max(1, cfg.threads),
+        }
     else:
-        log.info(f"OCR engine: PP-OCRv4 local ({len(kwargs)} models)")
+        log.info(
+            f"OCR engine: PP-OCRv4 local, det_side={cfg.det_limit_side_len}, "
+            f"threads={cfg.threads}"
+        )
     return RapidOCR(**kwargs)
 
 

@@ -20,27 +20,25 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Optional
 
-MODEL_ROOT = Path.home() / ".cache/modelscope/hub/models"
-
-ASR_MODEL = "speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch"
-VAD_MODEL = "speech_fsmn_vad_zh-cn-16k-common-pytorch"
-PUNC_MODEL = "punc_ct-transformer_cn-en-common-vocab471067-large"
-
-
-def resolve(name: str) -> str:
-    for ns in ("iic", "damo", ""):
-        p = MODEL_ROOT / ns / name if ns else MODEL_ROOT / name
-        if p.is_dir() and any(p.iterdir()):
-            return str(p)
-    return "iic/%s" % name
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from asr_worker import (  # noqa: E402  复用 worker 的路径解析与标签解析
+    PUNC_MODEL,
+    VAD_MODEL,
+    default_ncpu,
+    parse_sensevoice,
+    resolve,
+    resolve_sensevoice,
+    ASR_MODEL,
+)
 
 
 class Engine:
     """模型单例。ASR 本身是 CPU 密集型，串行化反而比多线程抢核更稳。"""
 
-    def __init__(self, ncpu: int, device: str):
-        self.ncpu = ncpu
+    def __init__(self, ncpu: int, device: str, engine: str = "sensevoice"):
+        self.ncpu = ncpu or default_ncpu()
         self.device = device
+        self.engine = engine
         self.model: Optional[Any] = None
         self.lock = threading.Lock()        # 推理串行，避免抢核
         self.load_lock = threading.Lock()   # 加载只做一次，其余线程在这等
@@ -59,16 +57,28 @@ class Engine:
             try:
                 from funasr import AutoModel
 
-                self.model = AutoModel(
-                    model=resolve(ASR_MODEL),
-                    vad_model=resolve(VAD_MODEL),
-                    punc_model=resolve(PUNC_MODEL),
-                    device=self.device,
-                    ncpu=self.ncpu,
-                    disable_update=True,
-                )
+                if self.engine == "sensevoice":
+                    self.model = AutoModel(
+                        model=resolve_sensevoice(),
+                        vad_model=resolve(VAD_MODEL),
+                        vad_kwargs={"max_single_segment_time": 30000},
+                        device=self.device,
+                        ncpu=self.ncpu,
+                        disable_update=True,
+                        disable_pbar=True,
+                    )
+                else:
+                    self.model = AutoModel(
+                        model=resolve(ASR_MODEL),
+                        vad_model=resolve(VAD_MODEL),
+                        punc_model=resolve(PUNC_MODEL),
+                        device=self.device,
+                        ncpu=self.ncpu,
+                        disable_update=True,
+                    )
                 self.load_seconds = round(time.time() - t0, 1)
-                print("[asr-server] model loaded in %.1fs" % self.load_seconds, flush=True)
+                print("[asr-server] %s loaded in %.1fs (ncpu=%d)"
+                      % (self.engine, self.load_seconds, self.ncpu), flush=True)
             except Exception as e:  # 加载失败要让客户端看到原因
                 self.error = "%s: %s" % (type(e).__name__, e)
                 print("[asr-server] load failed: %s" % self.error, file=sys.stderr, flush=True)
@@ -82,15 +92,28 @@ class Engine:
             return {"ok": False, "error": self.error or "model unavailable"}
         t0 = time.time()
         with self.lock:
-            result = self.model.generate(
-                input=audio, batch_size_s=batch_size_s,
-                merge_vad=True, merge_length_s=15,
-            )
+            if self.engine == "sensevoice":
+                result = self.model.generate(
+                    input=audio, cache={}, language="zh", use_itn=True,
+                    batch_size_s=batch_size_s, output_timestamp=True,
+                )
+            else:
+                result = self.model.generate(
+                    input=audio, batch_size_s=batch_size_s,
+                    merge_vad=True, merge_length_s=15,
+                )
         first = result[0] if result else {}
+        if self.engine == "sensevoice":
+            text, marks = parse_sensevoice(first.get("text", ""))
+        else:
+            text, marks = first.get("text", ""), []
         return {
             "ok": True,
-            "text": first.get("text", ""),
+            "engine": self.engine,
+            "text": text,
             "timestamp": first.get("timestamp", []),
+            "emotions": marks,
+            "ncpu": self.ncpu,
             "infer_seconds": round(time.time() - t0, 2),
         }
 
@@ -118,6 +141,10 @@ class Handler(BaseHTTPRequestHandler):
                 "loading": e.loading,
                 "error": e.error,
                 "load_seconds": e.load_seconds,
+                # 客户端要能识别「常驻服务的引擎和当前配置不一致」，
+                # 否则切了 engine 之后仍然打到旧模型上，静默跑错
+                "engine": e.engine,
+                "ncpu": e.ncpu,
             })
         else:
             self._send(404, {"ok": False, "error": "not found"})
@@ -149,18 +176,21 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8788)
-    ap.add_argument("--ncpu", type=int, default=6)
+    ap.add_argument("--ncpu", type=int, default=0, help="0=按性能核数自动决定")
     ap.add_argument("--device", default="cpu")
+    ap.add_argument("--engine", default="sensevoice",
+                    choices=["sensevoice", "paraformer"])
     ap.add_argument("--preload", action="store_true", help="启动即加载模型")
     args = ap.parse_args()
 
-    engine = Engine(args.ncpu, args.device)
+    engine = Engine(args.ncpu, args.device, args.engine)
     Handler.engine = engine
     if args.preload:
         threading.Thread(target=engine.load, daemon=True).start()
 
     srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
-    print("[asr-server] listening on 127.0.0.1:%d (ncpu=%d)" % (args.port, args.ncpu), flush=True)
+    print("[asr-server] listening on 127.0.0.1:%d (engine=%s, ncpu=%d)"
+          % (args.port, args.engine, engine.ncpu), flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

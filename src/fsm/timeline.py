@@ -70,6 +70,19 @@ def build_units(
         text = "".join(x["text"] for x in ss).strip()
         sub_text = "".join(x["text"] for x in tt).strip()
         chars = sum(1 for c in text if c not in "，。？！、；：\u201c\u201d ")
+        # SenseVoice 给的是段级情感标签，按 unit 内句子汇总：
+        # 只要有一句是 ANGRY 就算这个 unit 有冲突，NEUTRAL 只给极低的基础分。
+        # 用比例而不是「取最强那个」，否则整片 30% 都是 ANGRY 时这个维度
+        # 就失去区分度，所有候选同分。
+        emos = [x.get("emotion") for x in ss if x.get("emotion")]
+        emotion, emotion_sv = "", None
+        if emos:
+            n = len(emos)
+            angry = sum(1 for e in emos if e == "ANGRY")
+            happy = sum(1 for e in emos if e == "HAPPY")
+            neutral = n - angry - happy
+            emotion = "ANGRY" if angry else ("HAPPY" if happy else "NEUTRAL")
+            emotion_sv = round(min(1.0, (angry * 1.0 + happy * 0.7 + neutral * 0.08) / n), 3)
         units.append({
             "id": f"u{gi:03d}",
             "start": start,
@@ -85,6 +98,9 @@ def build_units(
             "subtitle": sub_text,
             "chars": chars,
             "has_text": bool(text or sub_text),
+            # 注意别叫 emotion：recall 输出的 emotion 是 0-1 的分数，同名会被覆盖
+            "emotion_label": emotion,
+            "emotion_sv": emotion_sv,
         })
 
     log.info(f"units: {len(units)} from {len(shots)} shots")

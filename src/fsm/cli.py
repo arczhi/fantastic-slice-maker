@@ -206,6 +206,18 @@ def cmd_doctor(args) -> int:
     worker = Path(cfg.asr.worker).expanduser()
     rows.append(("ASR worker", worker.exists(), str(worker)))
 
+    # SenseVoice 权重不在 models/ 命名空间下，且没拉时会静默回退 paraformer，
+    # 所以在自检里显式报出来，免得「以为在用快的那个」
+    sv_ok, sv_note = False, "not downloaded (will fall back to paraformer)"
+    for cand in (Path.home() / ".cache/modelscope/hub/iic/SenseVoiceSmall",
+                 Path.home() / ".cache/modelscope/hub/models/iic/SenseVoiceSmall"):
+        if (cand / "model.pt").exists():
+            sv_ok = True
+            sv_note = f"{cand.name} {sum(f.stat().st_size for f in cand.glob('*') if f.is_file()) // 1024 // 1024}MB"
+            break
+    engine_note = cfg.asr.engine + ("" if cfg.asr.engine != "sensevoice" or sv_ok else " → 回退 paraformer")
+    rows.append((f"ASR engine: {engine_note}", sv_ok or cfg.asr.engine != "sensevoice", sv_note))
+
     for label, path in (("PP-OCR det", cfg.ocr.det_model), ("PP-OCR rec", cfg.ocr.rec_model)):
         p = Path(path).expanduser()
         rows.append((label, p.exists(), f"{p.name} {p.stat().st_size // 1024 // 1024}MB" if p.exists() else str(p)))
@@ -242,6 +254,26 @@ def cmd_doctor(args) -> int:
         "并发上限", True,
         f"{res_mod.safe_workers(cfg.resource, 99)} 部并发 / "
         f"{snap['cpu_cores']} 核 {snap['free_mem_gb']}GB 可用 / 负载 {snap['load_per_core']:.2f}/核",
+    ))
+
+    # 三路信号是并行的，把配额摊开看，避免「总配额超过物理核数」还没人发现
+    asr_n = cfg.asr.ncpu or res_mod.perf_cores()
+    budget = asr_n + cfg.ocr.threads + 2
+    rows.append((
+        f"信号核数预算", budget <= snap["cpu_cores"],
+        f"ASR {asr_n} + OCR {cfg.ocr.threads} + 视觉 2 = {budget} / {snap['cpu_cores']} 核",
+    ))
+
+    from . import ffmpeg as ff_mod
+    from .render import _encoder_slots
+
+    encs = _encoder_slots(cfg.render, 99)
+    hw = sum(1 for e in encs if e != "libx264")
+    sw = len(encs) - hw
+    rows.append((
+        "编码器池", True,
+        f"软编 {sw} 槽 + 硬编 {hw} 槽"
+        + ("" if ff_mod.has_encoder("h264_videotoolbox") else "（无 VideoToolbox，仅软编）"),
     ))
 
     width = max(len(r[0]) for r in rows) + 2

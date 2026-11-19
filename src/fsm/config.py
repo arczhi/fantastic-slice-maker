@@ -48,11 +48,16 @@ class ASRCfg:
     server: str = ""                 # 常驻服务脚本，由 config.load 填
     server_port: int = 8788
     use_server: bool = True          # 常驻服务可用时优先走 HTTP
+    # sensevoice：230M 非自回归，480s 素材 68s，额外产出情感/音频事件（默认）
+    # paraformer：SeACo-Paraformer large，106-148s，原生句级时间戳
+    engine: str = "sensevoice"
     model: str = "paraformer-zh"
     vad_model: str = "fsmn-vad"
     punc_model: str = "ct-punc"
     device: str = "cpu"
-    ncpu: int = 6
+    # 0 = 自动取性能核数。SenseVoice 实测 4 线程 68s、8 线程 155s——
+    # 超过性能核数后线程被调度到能效核，反而互相拖慢
+    ncpu: int = 0
     batch_size_s: int = 300
     timeout: int = 1800
 
@@ -70,6 +75,11 @@ class OCRCfg:
     change_threshold: float = 2.5    # 字幕带平均像素差阈值，超过才 OCR
     min_confidence: float = 0.55
     frame_width: int = 960           # 送 OCR 前的帧宽
+    det_limit_side_len: int = 480    # 检测输入长边；736→480 快一倍，字幕仍认得准
+    # ONNX 默认按核数开 intra-op 线程，实测占到 5.8 个核；限到 3 只慢 3%
+    # 却降回 3.5 个核——超出有效并行度的线程基本在自旋空转。
+    # 三路信号（ASR/OCR/视觉）是并行的，这里必须给配额，否则互相抢核。
+    threads: int = 3
     timeout: int = 900
 
 
@@ -148,6 +158,10 @@ class RenderCfg:
     timeout: int = 900
     threads: int = 3                 # 单段裁切的 x264 线程数，与 workers 相乘别超过核数
     blur_div: int = 4                # 模糊层在 1/blur_div 分辨率上做再放大（4≈肉眼看不出差别）
+    encoder: str = "auto"            # auto | libx264 | h264_videotoolbox
+    cpu_slots: int = 2               # 软编（x264）并发槽位
+    gpu_slots: int = 2               # 硬编（VideoToolbox）并发槽位，与 CPU 槽位互不争抢
+    vt_bitrate: str = "6M"           # 硬编码率，硬编只能定码率
 
 
 @dataclass

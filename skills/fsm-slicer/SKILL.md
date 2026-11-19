@@ -40,10 +40,13 @@ $FSM/bin/fsm doctor
 |---|---|
 | `ffmpeg` / `ffprobe` missing | 必须先装（`brew install ffmpeg`），否则跑不起来 |
 | `FunASR env` missing | 继续。台词改从 OCR 字幕取；跑批加 `--no-asr` 更快 |
+| `ASR engine: sensevoice` 显示回退 paraformer | 权重没拉（约 900MB）。能跑但慢一倍、没情感标签；想启用就按 `README` 里的 snapshot_download 命令拉一次 |
 | `PP-OCR` missing | 继续，会自动用 rapidocr 自带模型 |
 | `DeepSeek key` missing | 必须解决，见步骤 3 |
 | `BGM library` 0 首 | 加 `--no-bgm`，或先 `$FSM/bin/fsm bgm`（约 15 分钟） |
 | `并发上限` N 部 | 这是本机安全并发数，跑批时心里有数，别硬压 |
+| `信号核数预算` 超了 | ASR + OCR + 视觉的线程配额加起来超过了物理核数，会互相抢。调小 `asr.ncpu` 或 `ocr.threads` |
+| `编码器池` 只有软编 | 本机 ffmpeg 没有 VideoToolbox，纯 CPU 编码，批量会慢一档 |
 
 依赖没装过：
 
@@ -140,6 +143,10 @@ $FSM/bin/fsm batch /abs/path/素材目录 --total 3 --workers 2
 - 每完成一部才补下一部，补之前检查负载：单核负载 > 1.2 或可用内存 < 3GB 就暂停派活（最长等 180 秒后放行）。
 - 子进程统一 `nice 5`，前台办公、看视频不受影响。
 - 单段裁切 x264 限 3 线程（`render.threads`），和 worker 数相乘不会超核。
+- 三路信号（ASR / OCR / 视觉）是**并行**跑的，各自有线程配额：ASR 取性能核数、OCR 3 线程、视觉 2。都按满核开会互相抢，实测 OCR 单独 42 秒、抢起来变 170-210 秒。`doctor` 里的「信号核数预算」这行不该超过总核数。
+- 渲染的编码器分两个池：硬编（VideoToolbox）走媒体引擎不占 CPU，软编吃 CPU，共享队列动态取活。硬编的媒体引擎是**串行**的，所以 `gpu_slots` 调大没有意义。
+
+**不要**靠 `--workers 8` 抢时间：ASR 服务内部是全局串行的，多开的进程只会互相抢核，总时长反而变长。
 
 需要更保守时：
 

@@ -19,6 +19,7 @@ import os
 import platform
 import re
 import subprocess
+import subprocess
 import time
 
 from .util import get_logger
@@ -30,6 +31,24 @@ _PAGE_RE = re.compile(r"page size of (\d+) bytes")
 
 def cpu_count() -> int:
     return os.cpu_count() or 4
+
+
+def perf_cores() -> int:
+    """性能核数（Apple Silicon 的 perflevel0）。
+
+    ASR 的线程数要按这个值给：M5 是 4P+6E，ncpu=4 时 68 秒，
+    开到 8 反而 155 秒——多出来的线程被调度到能效核上互相等。
+    拿不到（Intel Mac / Linux）时退回总核数的一半，最多 4。
+    """
+    try:
+        p = subprocess.run(["sysctl", "-n", "hw.perflevel0.physicalcpu"],
+                           capture_output=True, text=True, timeout=3)
+        n = int(p.stdout.strip() or 0)
+        if n > 0:
+            return n
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    return max(2, min(4, cpu_count() // 2))
 
 
 def load1() -> float:

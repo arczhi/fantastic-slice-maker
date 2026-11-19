@@ -62,7 +62,13 @@ def score_units(units: list[dict], duration: float, cfg: RecallCfg,
     for u in units:
         dur = max(0.5, u["dur"])
         density = min(1.0, (u["chars"] / dur) / 3.2)          # 字/秒，3.2 字/秒视为满
+        # 两路情绪信号取较大值：词表能抓到「找死」「放肆」这类系统未必标 ANGRY 的
+        # 台词，SenseVoice 能抓到词表覆盖不到的语气爆发（比如没有脏字的怒吼）。
+        # recall 的定位是「别漏掉该看的」，所以宁可比实际更敏感。
         emo = min(1.0, emotion_score(u["text"] or u["subtitle"]) / 4.0)
+        emo_sv = u.get("emotion_sv")
+        if emo_sv is not None:
+            emo = max(emo, emo_sv)
         motion = min(1.0, u["motion"] / max_motion)
         center = min(1.0, u["center"] / max_center)
         sub = 1.0 if u["subtitle"] else (0.6 if u["text"] else 0.0)

@@ -20,6 +20,25 @@ def _bin(name: str) -> str:
     return name
 
 
+_encoders_cache: set[str] | None = None
+
+
+def has_encoder(name: str) -> bool:
+    """本机 ffmpeg 是否带某个编码器。结果缓存，批量时只探测一次。"""
+    global _encoders_cache
+    if _encoders_cache is None:
+        try:
+            p = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"],
+                               capture_output=True, timeout=20)
+            text = p.stdout.decode("utf-8", "replace")
+            _encoders_cache = {
+                m.group(1) for m in re.finditer(r"^\s*V\S{5}\s+(\S+)", text, re.M)
+            }
+        except (OSError, subprocess.SubprocessError):
+            _encoders_cache = set()
+    return name in _encoders_cache
+
+
 def run(args: list[str], timeout: int = 900) -> subprocess.CompletedProcess:
     try:
         p = subprocess.run(args, capture_output=True, timeout=timeout)
@@ -182,6 +201,7 @@ def cut(
     timeout: int = 600, has_audio: bool = True,
     subs: list[dict] | None = None, threads: int = 3,
     src_size: tuple[int, int] | None = None, blur_div: int = 4,
+    encoder: str = "libx264", vt_bitrate: str = "6M",
 ) -> Path:
     """精确切片 + 竖屏改装（上下模糊，保留原画面完整不被裁切）。
 
@@ -247,9 +267,18 @@ def cut(
             "-filter_complex", f"[0:v]{vf}",
             "-map", "[v]", "-an",
         ]
-    cmd += [
-        "-c:v", "libx264", "-preset", preset, "-crf", str(crf),
-        "-threads", str(max(1, threads)),
+    if encoder == "h264_videotoolbox":
+        # 硬件编码走独立媒体引擎，不占 CPU；代价是只能定码率，画质随内容波动。
+        enc = [
+            "-c:v", "h264_videotoolbox", "-b:v", vt_bitrate,
+            "-maxrate", vt_bitrate, "-bufsize", "12M",
+        ]
+    else:
+        enc = [
+            "-c:v", "libx264", "-preset", preset, "-crf", str(crf),
+            "-threads", str(max(1, threads)),
+        ]
+    cmd += enc + [
         "-r", str(fps), "-pix_fmt", "yuv420p", "-movflags", "+faststart",
         str(dst),
     ]

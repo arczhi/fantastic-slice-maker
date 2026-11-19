@@ -199,8 +199,10 @@ workers: 3
 asr:
   enabled: true
   python: ""              # FunASR 解释器；留空自动探测，或用 FUNASR_PYTHON
+  engine: sensevoice      # sensevoice（快一倍+情感标签）| paraformer（原生句级时间戳）
   model: paraformer-zh
   device: cpu
+  ncpu: 0                 # 0=自动取性能核数。SenseVoice 超过性能核数反而变慢
   batch_size_s: 120
   timeout: 1800
   server_port: 8788
@@ -216,6 +218,8 @@ ocr:
   band_top: 0.42          # 字幕带起始位置（占帧高比例）
   change_threshold: 5.0   # 相邻帧差异小于此值则复用上次识别
   min_confidence: 0.55
+  det_limit_side_len: 480 # 检测输入长边；736→480 快一倍且字幕仍准
+  threads: 3              # ONNX 线程配额。不限会占 5.8 核；限 3 只慢 3% 却省 40%
 
 vision:
   fps: 4.0
@@ -252,13 +256,17 @@ render:
   width: 1080
   height: 1920
   fps: 30
-  crf: 20
-  preset: veryfast
+  crf: 22
+  preset: ultrafast       # 批量优先速度；要画质改 veryfast/superfast（crf 各加 2）
   loudness_i: -14
   blur_sigma: 24
   audio_bitrate: 192k
   threads: 3              # 单段 x264 线程数，与 workers 相乘别超核数
   blur_div: 4             # 模糊层在 1/N 分辨率上做再放大；1=全分辨率（更耗 CPU）
+  encoder: auto           # auto=硬编+软编双池 | libx264 | h264_videotoolbox
+  cpu_slots: 2            # 软编并发槽位（吃 CPU）
+  gpu_slots: 2            # 硬编并发槽位（走媒体引擎，不占 CPU）
+  vt_bitrate: 6M          # 硬编目标码率；实测常打不满，体积反而更小
 
 output:                   # 出片数量与跨套去重
   reels: 2
