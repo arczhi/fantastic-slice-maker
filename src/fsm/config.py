@@ -146,6 +146,7 @@ class RenderCfg:
     blur_sigma: int = 24
     audio_bitrate: str = "192k"
     timeout: int = 900
+    threads: int = 3                 # 单段裁切的 x264 线程数，与 workers 相乘别超过核数
 
 
 @dataclass
@@ -159,6 +160,29 @@ class SubtitleCfg:
     bottom_pct: float = 0.06          # 字幕底边距原画面底部比例
     stroke: int = 3
     min_cue: float = 0.55
+
+
+@dataclass
+class ResourceCfg:
+    """跑批的资源上限。默认值按「10 核 / 32GB 上跑得舒服」标定。"""
+    max_workers: int = 0             # 0 = 按核数与内存自动推算
+    cpu_per_worker: int = 3          # 每个 worker 期望占用的核数
+    mem_per_worker_gb: float = 2.5   # 每个 worker 峰值内存（700s 素材实测约 2GB）
+    min_free_mem_gb: float = 3.0     # 可用内存低于此值就暂停派活
+    max_load_per_core: float = 1.2   # 单核负载超过此值就暂停派活
+    nice: int = 5                    # 子进程降优先级，保住前台交互
+    gate_max_wait: float = 180.0     # 闸门最长等待，超时放行
+
+
+@dataclass
+class OutputCfg:
+    """出片数量：同一部剧可以出多套互不重复的方案（组合式批量出片）。"""
+    reels: int = 2                   # 每套方案出几条
+    variants: int = 1                # 出几套方案
+    per_plan: int = 3                # 指定总条数时，单次规划最多给几条（>3 质量会掉）
+    max_total: int = 12              # 单部剧总条数上限，防手滑
+    dedupe_hook: bool = True         # 跨方案不复用同一段 hook
+    overlap: float = 0.6             # 与前几套的候选重合率超过此值即驳回
 
 
 @dataclass
@@ -178,6 +202,8 @@ class Config:
     render: RenderCfg = field(default_factory=RenderCfg)
     bgm: BGMCfg = field(default_factory=BGMCfg)
     subtitle: SubtitleCfg = field(default_factory=SubtitleCfg)
+    output: OutputCfg = field(default_factory=OutputCfg)
+    resource: ResourceCfg = field(default_factory=ResourceCfg)
     paths: PathsCfg = field(default_factory=PathsCfg)
     workers: int = 3                 # 同时处理的剧数
     force: bool = False

@@ -168,7 +168,7 @@ def cut(
     *, width: int, height: int, fps: int, crf: int, preset: str,
     loudness_i: float, blur_sigma: int, audio_bitrate: str,
     timeout: int = 600, has_audio: bool = True,
-    subs: list[dict] | None = None,
+    subs: list[dict] | None = None, threads: int = 3,
 ) -> Path:
     """精确切片 + 竖屏改装（上下模糊，保留原画面完整不被裁切）。
 
@@ -219,7 +219,7 @@ def cut(
         ]
     cmd += [
         "-c:v", "libx264", "-preset", preset, "-crf", str(crf),
-        "-threads", "3",
+        "-threads", str(max(1, threads)),
         "-r", str(fps), "-pix_fmt", "yuv420p", "-movflags", "+faststart",
         str(dst),
     ]

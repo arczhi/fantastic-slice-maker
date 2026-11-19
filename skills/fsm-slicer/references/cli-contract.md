@@ -7,14 +7,26 @@
 ```
 fsm [--config PATH] [--verbose] <子命令>
 
-fsm run    <video>            [--reels N] [--force] [--rerender] [--no-asr] [--no-ocr] [--no-llm] [--no-bgm] [--subtitle auto|on|off]
-fsm batch  <inputs...>        [--workers N] [--limit N] [--reels N] [同上开关]
-fsm watch  <inputs...>        [--interval 60] [--reels N]
+fsm run    <video>            [--total N | --variants V | --reels N] [--force] [--rerender] [--no-asr] [--no-ocr] [--no-llm] [--no-bgm] [--subtitle auto|on|off] [--max-load X] [--min-free-mem G] [--nice N]
+fsm batch  <inputs...>        [--workers N] [--limit N] [同上全部开关]
+fsm watch  <inputs...>        [--interval 60] [同上全部开关]
 fsm doctor
 fsm bgm
 ```
 
 `inputs` 可以是目录（递归收集 `.mp4/.mov/.mkv/.avi/.flv/.webm/.ts/.m4v`）或文件列表。
+
+### 出片数量三选一
+
+| 参数 | 语义 | 例 |
+|---|---|---|
+| `--total N` | 直接要 N 条，自动拆套（单套 ≤ `output.per_plan`） | 6 → `[3, 3]`；7 → `[3, 2, 2]` |
+| `--variants V` | V 套方案，每套 `--reels` 条 | `--variants 3 --reels 2` → 6 条 |
+| `--reels N` | 1 套 N 条 | `--reels 3` → 3 条 |
+
+优先级 `--total` > `--variants` > `--reels` > 配置默认（`output.reels` × `output.variants`）。
+套与套之间强制去重：hook 段不复用，候选重合率 ≥ `output.overlap`（默认 0.6）驳回重出。
+
 
 ## 退出码
 
@@ -35,8 +47,11 @@ fsm bgm
   "video": "/abs/path/ep.mp4",
   "error": null,
   "strategy": "llm",
+  "variants": 2,
+  "reels_per_variant": [3, 3],
   "reels": [
-    { "title": "...", "path": "/abs/out/.../01_xxx.mp4", "duration": 43.72, "qc": true }
+    { "variant": 1, "index": 1, "title": "...", "path": "/abs/out/.../v01-01_xxx.mp4",
+      "duration": 43.72, "qc": true }
   ]
 }
 ```
@@ -53,7 +68,10 @@ fsm bgm
   "reels": 10,
   "elapsed_seconds": 549.4,
   "avg_seconds_per_video": 54.9,
-  "workers": 3,
+  "workers": 2,
+  "gate_wait_seconds": 0.0,
+  "resource": { "cpu_cores": 10, "load1": 2.58, "load_per_core": 0.26, "free_mem_gb": 6.6 },
+  "reels_plan": { "total": 6 },
   "report_path": "out/batches/batch_20261119-094024.json",
   "results": [
     {
@@ -97,9 +115,12 @@ fsm bgm
     "coverage": 0.358,                  // OCR 字幕覆盖率（有字幕片 20%-78%，无字幕片 <5%）
     "reason": "源片自带字幕（覆盖率 35.8%）"
   },
-  "reel_count": 1,
+  "reel_count": 2,
+  "variants": 2,
+  "reels_per_variant": [3, 3],
   "reels": [{
     "index": 1,
+    "variant": 1,
     "ok": true,
     "title": "叛徒已擒！挡我者死",
     "hook": "叛徒已擒挡我者",
@@ -163,8 +184,8 @@ fsm bgm
 | `ocr.json` | 字幕条（文本 + 时间） |
 | `timeline.json` | 语义单元 |
 | `recall.json` | 候选与打分 |
-| `plan.json` | DeepSeek 原始剪辑单 |
-| `reel01/` | 单条成片的切片与渲染中间文件 |
+| `plan_v01.json` … | 每套方案的剪辑单（含指纹；候选/条数/已用 hook 变化即失效） |
+| `v01/reel01/` | 该套该条成片的切片与渲染中间文件 |
 
 删掉即可重算。`--force` 忽略缓存全部重算，`--rerender` 只重跑 `reel*` 之后的部分。
 
@@ -236,6 +257,24 @@ render:
   loudness_i: -14
   blur_sigma: 24
   audio_bitrate: 192k
+  threads: 3              # 单段 x264 线程数，与 workers 相乘别超核数
+
+output:                   # 出片数量与跨套去重
+  reels: 2
+  variants: 1
+  per_plan: 3             # 指定总条数时单套最多几条
+  max_total: 12
+  dedupe_hook: true
+  overlap: 0.6
+
+resource:                 # 跑批资源闸门
+  max_workers: 0          # 0 = 按核数与内存自动推算
+  cpu_per_worker: 3
+  mem_per_worker_gb: 2.5
+  min_free_mem_gb: 3.0
+  max_load_per_core: 1.2
+  nice: 5
+  gate_max_wait: 180
 
 bgm:
   enabled: true

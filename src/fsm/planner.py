@@ -44,7 +44,7 @@ TEMPLATE = """把下面这部漫剧剪成 {n_reels} 条竖屏切片，每条 {ta
 7. in/out 必须落在候选的可剪区间内，用原始时间轴秒数。
 
 {n_reels} 条之间不允许共用同一个 hook 段落，切入角度要不同（比如一条主打对抗、
-一条主打悬念或反转）。同一条内不要重复使用同一个候选 id。
+一条主打悬念或反转）。同一条内不要重复使用同一个候选 id。{variant_note}
 
 只输出如下 JSON：
 {{
@@ -59,6 +59,15 @@ TEMPLATE = """把下面这部漫剧剪成 {n_reels} 条竖屏切片，每条 {ta
     }}
   ]
 }}"""
+
+VARIANT_NOTE = """
+
+这是同一部剧的第 {v} 套方案（共 {total} 套），前几套已经交付，本套必须换角度重剪：
+{used_hooks}
+{used_ids}
+- 已用过的候选能不用就不用，优先从没出现过的候选里重新组故事线；
+- 结构仍然要完整，但人物关系、冲突点、悬念落点都要和前几套明显不同。"""
+
 
 
 class PlannerError(RuntimeError):
@@ -207,15 +216,23 @@ def _trim(beats: list[dict], max_seconds: float) -> list[dict]:
     return out
 
 
-def _fallback_reels(cands: list[dict], cfg: PlannerCfg, n: int) -> list[dict]:
-    """模型失败时的兜底：按规则分排序，为每条切片错开候选。"""
+def _fallback_reels(cands: list[dict], cfg: PlannerCfg, n: int,
+                    offset: int = 0, avoid: set[str] | None = None) -> list[dict]:
+    """模型失败时的兜底：按规则分排序，为每条切片错开候选。
+
+    offset 让不同套方案从排序结果的不同起点切进去，否则每套兜底都是同一条片子。
+    """
+    avoid = avoid or set()
     ordered = sorted(cands, key=lambda c: -c["score"])
+    pool = [c for c in ordered if c["cand_id"] not in avoid]
+    if len(pool) < 3:            # 躲得太狠会凑不出片，宁可重复
+        pool = ordered
     reels = []
     for r in range(n):
         picked: list[dict] = []
         total = 0.0
-        for k, c in enumerate(ordered):
-            if k % n != r % max(1, n):
+        for k, c in enumerate(pool):
+            if k % n != (r + offset) % max(1, n):
                 continue
             if total >= cfg.target_seconds or len(picked) >= 5:
                 break
@@ -264,24 +281,86 @@ def _enforce_hook(beats: list[dict]) -> list[dict]:
     return beats
 
 
-def plan(cands: list[dict], cfg: PlannerCfg, n_reels: int = 2) -> dict:
-    """返回 {strategy, reels:[{title,hook,reason,beats,total}], elapsed, error}。"""
+def split_counts(total: int, per_plan: int = 3, max_total: int = 12) -> list[int]:
+    """把「总共要几条」拆成每套方案的条数。
+
+    为什么不一次性让模型出 8 条：实测一次要 5 条以上，模型会开始凑数——
+    结构完整的那两条还不错，后面的 hook 越来越弱、段落开始重复。所以拆成
+    每套 2-3 条、多套方案，跨套还用不同的候选，成品之间的差异更真实。
+
+    例：total=7, per_plan=3 → [3, 2, 2]；total=3 → [3]；total=1 → [1]。
+    """
+    total = max(1, min(int(total), max(1, int(max_total))))
+    per_plan = max(1, int(per_plan))
+    variants = min(max(1, -(-total // per_plan)), total)   # 向上取整，且不超过总条数
+    base, rem = divmod(total, variants)
+    return [base + (1 if i < rem else 0) for i in range(variants)]
+
+
+def fingerprint(cands: list[dict], n_reels: int, variant: int,
+                used_hooks: set[str] | None = None) -> str:
+    """剪辑单缓存的指纹：候选集或套数变了就必须重新规划。
+
+    以前 plan.json 只按视频 id 缓存，改 --reels 也照样读旧的 2 条方案，
+    出片数量和用户要求对不上。指纹里带上候选 id、条数、套号和已用 hook，
+    任何一种变化都会重新请求模型。
+    """
+    import hashlib
+
+    raw = "|".join([
+        str(n_reels), str(variant),
+        ",".join(sorted(used_hooks or ())),
+        ",".join(c["cand_id"] for c in cands),
+    ])
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _overlap(a: set[str], b: set[str]) -> float:
+    if not a or not b:
+        return 0.0
+    return len(a & b) / min(len(a), len(b))
+
+
+def plan(
+    cands: list[dict], cfg: PlannerCfg, n_reels: int = 2, *,
+    variant: int = 1, variants_total: int = 1,
+    used_hooks: set[str] | None = None, used_prior: list[list[str]] | None = None,
+    dedupe_hook: bool = True, overlap_max: float = 0.6,
+) -> dict:
+    """返回 {strategy, reels:[{title,hook,reason,beats,total}], elapsed, error}。
+
+    variant/variants_total 用于「同一部剧出多套方案」：会把前几套已用过的
+    hook 与候选喂给模型，并在校验阶段驳回撞 hook、或与旧方案重合度过高的片子。
+    """
     t0 = time.time()
     if not cands:
         return {"strategy": "none", "reels": [], "error": "no candidates"}
 
     n_reels = max(1, n_reels)
+    used_hooks = set(used_hooks or ())
+    prior_sets = [set(x) for x in (used_prior or [])]
 
     if cfg.enabled:
+        note = ""
+        if variant > 1 or variants_total > 1:
+            hooks_line = ("- 已用过的开头段落（禁止再用作 hook）："
+                          + ("、".join(sorted(used_hooks)) if used_hooks else "无"))
+            used_all = sorted({c for s in prior_sets for c in s})
+            ids_line = ("- 已用过的候选（能不用就不用）："
+                        + ("、".join(used_all[:40]) if used_all else "无"))
+            note = VARIANT_NOTE.format(v=variant, total=variants_total,
+                                       used_hooks=hooks_line, used_ids=ids_line)
         prompt = TEMPLATE.format(
             n_reels=n_reels, target=cfg.target_seconds,
             min_s=cfg.min_seconds, max_s=cfg.max_seconds,
-            candidates=_fmt_candidates(cands),
+            candidates=_fmt_candidates(cands), variant_note=note,
         )
         # 被驳回时把原因回灌给模型再试一次。原样重发 prompt 只会让它重复
         # 同样的错误——实测三次都用同一个偏短的方案，最后白烧三次调用。
         feedback: list[str] = []
-        for attempt, temp in enumerate((cfg.temperature, 0.5, 0.3), start=1):
+        # 多套方案时温度略微上调，让后几套真的换角度而不是照抄前一套
+        base_temp = min(1.0, cfg.temperature + 0.06 * (variant - 1))
+        for attempt, temp in enumerate((base_temp, min(1.0, base_temp + 0.1), 0.4), start=1):
             messages = [
                 {"role": "system", "content": SYSTEM},
                 {"role": "user", "content": prompt},
@@ -317,20 +396,40 @@ def plan(cands: list[dict], cfg: PlannerCfg, n_reels: int = 2) -> dict:
                     if total > cfg.max_seconds * 1.35:
                         beats = _trim(beats, cfg.max_seconds)
                         total = sum(b["dur"] for b in beats)
+                    beats = _enforce_hook(beats)
+                    ids = {b["cand_id"] for b in beats}
+                    hook_id = next((b["cand_id"] for b in beats
+                                    if b["role"] == "hook"), "")
+
+                    # 跨套去重：hook 撞了就等于两条片子开头一模一样，
+                    # 投出去会被判重复内容；重合率过高也同理。
+                    if dedupe_hook and hook_id and hook_id in used_hooks:
+                        why = f"hook {hook_id} 已被前一套用过"
+                        log.warning(f"reel rejected: {why}")
+                        reasons.append(why)
+                        continue
+                    worst = max((_overlap(ids, s) for s in prior_sets), default=0.0)
+                    if worst >= overlap_max:
+                        why = f"与前一套重合 {worst:.0%}，换一批候选"
+                        log.warning(f"reel rejected: {why}")
+                        reasons.append(why)
+                        continue
+
                     reels.append({
                         "title": str(item.get("title") or "")[:40],
                         "hook": str(item.get("hook") or "")[:80],
                         "reason": str(item.get("reason") or "")[:200],
                         "strategy": "llm",
-                        "beats": _enforce_hook(beats),
+                        "beats": beats,
+                        "cand_ids": sorted(ids),
                         "total": round(total, 2),
                     })
                 if reels:
                     log.info(
-                        f"plan ok: {len(reels)} reels, "
+                        f"plan v{variant} ok: {len(reels)} reels, "
                         f"{[r['total'] for r in reels]}, attempt {attempt}"
                     )
-                    return {"strategy": "llm", "reels": reels,
+                    return {"strategy": "llm", "reels": reels, "variant": variant,
                             "elapsed": round(time.time() - t0, 2)}
                 feedback = reasons or ["没有任何一条切片通过校验"]
                 raise PlannerError("no valid reel in response: " + "; ".join(feedback[:3]))
@@ -339,8 +438,9 @@ def plan(cands: list[dict], cfg: PlannerCfg, n_reels: int = 2) -> dict:
             except Exception as e:
                 log.warning(f"plan attempt {attempt} crashed: {type(e).__name__}: {e}")
 
-    reels = _fallback_reels(cands, cfg, n_reels)
-    log.warning(f"plan fallback: {len(reels)} reels")
-    return {"strategy": "fallback", "reels": reels,
+    reels = _fallback_reels(cands, cfg, n_reels, offset=variant - 1,
+                            avoid=used_hooks)
+    log.warning(f"plan v{variant} fallback: {len(reels)} reels")
+    return {"strategy": "fallback", "reels": reels, "variant": variant,
             "elapsed": round(time.time() - t0, 2),
             "error": "llm unavailable, used rule fallback"}

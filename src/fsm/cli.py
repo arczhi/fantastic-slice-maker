@@ -22,7 +22,12 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     def add_common(sp):
-        sp.add_argument("--reels", type=int, default=2, help="每部剧产出几条切片")
+        sp.add_argument("--reels", type=int, default=None,
+                        help="每套方案出几条切片（默认取 config output.reels）")
+        sp.add_argument("--variants", type=int, default=None,
+                        help="出几套互不重复的方案；总条数 = reels × variants")
+        sp.add_argument("--total", type=int, default=None,
+                        help="直接指定总条数，自动拆成多套方案（如 6 → 3+3，7 → 3+2+2）")
         sp.add_argument("--force", action="store_true", help="忽略中间产物，全部重跑")
         sp.add_argument("--rerender", action="store_true", help="只重跑渲染与质检")
         sp.add_argument("--no-asr", action="store_true")
@@ -33,6 +38,12 @@ def _build_parser() -> argparse.ArgumentParser:
             "--subtitle", choices=["auto", "on", "off"], default="auto",
             help="自动补字幕：auto=源片无字幕时才补（默认），on=强制补，off=不补",
         )
+        sp.add_argument("--max-load", type=float, default=None,
+                        help="单核负载上限，超过就暂停派活（默认取 config resource）")
+        sp.add_argument("--min-free-mem", type=float, default=None,
+                        help="可用内存下限（GB），低于此值暂停派活")
+        sp.add_argument("--nice", type=int, default=None,
+                        help="子进程降优先级幅度（默认 5，0 表示不降）")
 
     sp = sub.add_parser("run", help="处理单个视频")
     sp.add_argument("video")
@@ -40,7 +51,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("batch", help="批量处理目录或文件列表")
     sp.add_argument("inputs", nargs="+")
-    sp.add_argument("--workers", type=int, default=None)
+    sp.add_argument("--workers", type=int, default=None,
+                    help="并发剧数；留空按 CPU 与内存自动推算")
     sp.add_argument("--limit", type=int, default=None)
     add_common(sp)
 
@@ -64,6 +76,12 @@ def _cfg(args) -> cfg_mod.Config:
         overrides.setdefault("planner", {})["enabled"] = False
     if args.no_bgm:
         overrides.setdefault("bgm", {})["enabled"] = False
+    if getattr(args, "max_load", None) is not None:
+        overrides.setdefault("resource", {})["max_load_per_core"] = args.max_load
+    if getattr(args, "min_free_mem", None) is not None:
+        overrides.setdefault("resource", {})["min_free_mem_gb"] = args.min_free_mem
+    if getattr(args, "nice", None) is not None:
+        overrides.setdefault("resource", {})["nice"] = args.nice
     return cfg_mod.load(getattr(args, "config", None), overrides)
 
 
@@ -79,7 +97,8 @@ def cmd_run(args) -> int:
     _ensure_asr(cfg, wait=False)
     try:
         rep = process(args.video, cfg, n_reels=args.reels, force=args.force,
-                      rerender=args.rerender, sub_mode=args.subtitle)
+                      rerender=args.rerender, sub_mode=args.subtitle,
+                      variants=args.variants, total=args.total)
     finally:
         _stop_asr(cfg)
     print(json.dumps({
@@ -89,8 +108,11 @@ def cmd_run(args) -> int:
         "has_audio": rep.get("has_audio"),
         "warnings": rep.get("warnings") or [],
         "strategy": rep.get("strategy"),
+        "variants": rep.get("variants"),
+        "reels_per_variant": rep.get("reels_per_variant"),
         "reels": [
-            {"title": r.get("title"), "path": r.get("path"),
+            {"variant": r.get("variant"), "index": r.get("index"),
+             "title": r.get("title"), "path": r.get("path"),
              "duration": r.get("duration"), "qc": (r.get("qc") or {}).get("ok")}
             for r in rep.get("reels", []) if r.get("ok")
         ],
@@ -107,6 +129,7 @@ def cmd_batch(args) -> int:
             args.inputs, cfg, n_reels=args.reels,
             workers=args.workers, force=args.force, limit=args.limit,
             rerender=args.rerender, sub_mode=args.subtitle,
+            variants=args.variants, total=args.total,
         )
     finally:
         _stop_asr(cfg)
@@ -152,7 +175,8 @@ def _stop_asr(cfg) -> None:
 def cmd_watch(args) -> int:
     cfg = _cfg(args)
     try:
-        batch.watch(args.inputs, cfg, n_reels=args.reels, interval=args.interval)
+        batch.watch(args.inputs, cfg, n_reels=args.reels, interval=args.interval,
+                    variants=args.variants, total=args.total)
     except KeyboardInterrupt:
         print("stopped")
     return 0
@@ -210,6 +234,15 @@ def cmd_doctor(args) -> int:
 
     rows.append(("work dir", True, cfg.paths.work))
     rows.append(("out dir", True, cfg.paths.out))
+
+    from . import resource as res_mod
+
+    snap = res_mod.snapshot()
+    rows.append((
+        "并发上限", True,
+        f"{res_mod.safe_workers(cfg.resource, 99)} 部并发 / "
+        f"{snap['cpu_cores']} 核 {snap['free_mem_gb']}GB 可用 / 负载 {snap['load_per_core']:.2f}/核",
+    ))
 
     width = max(len(r[0]) for r in rows) + 2
     print("\n环境自检\n" + "-" * 52)

@@ -1,17 +1,19 @@
-"""批量编排：每天数十部剧，进程级并行 + 单剧失败隔离。
+"""批量编排：每天数十部剧，进程级并行 + 单剧失败隔离 + 资源闸门。
 
 并行策略：外层按剧开进程（绕开 GIL，也让 ASR/OCR 的内存互不干扰），
-内层每部剧内部再并行三路信号。实测 10 核 M5 上 workers=3 是甜点，
-再高会和 ASR 抢 CPU 反而变慢。
+内层每部剧内部再并行三路信号。并发数不写死：由 resource.safe_workers 按
+核数与可用内存推算，再用滑动窗口派活——每完成一部才补下一部，补之前
+看一眼实时负载，超阈值就等一会儿。这样机器不会被一批任务同时压满，
+前台办公、看视频都不受影响。
 """
 from __future__ import annotations
 
 import json
-import os
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from pathlib import Path
 
+from . import resource
 from .config import Config
 from .pipeline import process
 from .util import ensure_dir, get_logger, now_iso
@@ -43,14 +45,16 @@ def discover(inputs: list[str]) -> list[Path]:
     return uniq
 
 
-def _worker(args: tuple[str, dict, int, bool, bool, str | None]) -> dict:
-    video, cfg_dict, n_reels, force, rerender, sub_mode = args
+def _worker(args: tuple[str, dict, int | None, bool, bool, str | None,
+                       int | None, int | None]) -> dict:
+    video, cfg_dict, n_reels, force, rerender, sub_mode, variants, total = args
     from . import config as cfg_mod
 
     cfg = cfg_mod.load(overrides=_strip(cfg_dict))
     try:
         return process(video, cfg, n_reels=n_reels, force=force,
-                       rerender=rerender, sub_mode=sub_mode)
+                       rerender=rerender, sub_mode=sub_mode,
+                       variants=variants, total=total)
     except Exception as e:  # 单剧崩了不能拖垮批次
         import traceback
 
@@ -60,9 +64,15 @@ def _worker(args: tuple[str, dict, int, bool, bool, str | None]) -> dict:
         }
 
 
+def _init_worker(nice: int) -> None:
+    """子进程统一降优先级，保证用户前台操作始终比跑批优先。"""
+    resource.apply_nice(nice)
+
+
 def _strip(cfg_dict: dict) -> dict:
     """只保留可覆盖的字段，避免把 paths/workers 这类运行时字段传乱。"""
-    keep = {"asr", "ocr", "vision", "recall", "planner", "render", "bgm", "subtitle"}
+    keep = {"asr", "ocr", "vision", "recall", "planner", "render", "bgm",
+            "subtitle", "output", "resource"}
     out = {k: v for k, v in cfg_dict.items() if k in keep}
     for k in out:
         if isinstance(out[k], dict):
@@ -71,9 +81,10 @@ def _strip(cfg_dict: dict) -> dict:
 
 
 def run(
-    inputs: list[str], cfg: Config, n_reels: int = 2,
+    inputs: list[str], cfg: Config, n_reels: int | None = None,
     workers: int | None = None, force: bool = False, limit: int | None = None,
     rerender: bool = False, sub_mode: str | None = None,
+    variants: int | None = None, total: int | None = None,
 ) -> dict:
     videos = discover(inputs)
     if limit:
@@ -81,36 +92,61 @@ def run(
     if not videos:
         return {"ok": False, "error": "no videos found", "videos": 0}
 
-    workers = workers or cfg.workers
-    workers = max(1, min(workers, len(videos)))
-    log.info(f"batch: {len(videos)} videos, workers={workers}, reels/video={n_reels}")
+    if workers:
+        cfg.resource.max_workers = workers      # 用户显式指定优先
+    workers = resource.safe_workers(cfg.resource, len(videos))
+    gate = resource.Gate(cfg.resource, max_wait=cfg.resource.gate_max_wait)
+    per_video = (f"{total} 条(自动拆套)" if total
+                 else f"{n_reels or cfg.output.reels} 条 × {variants or cfg.output.variants} 套")
+    log.info(f"batch: {len(videos)} videos, workers={workers}, 每部 {per_video}")
 
     cfg_dict = {k: v for k, v in cfg.to_dict().items()}
-    tasks = [(str(v), cfg_dict, n_reels, force, rerender, sub_mode) for v in videos]
+    tasks = [(str(v), cfg_dict, n_reels, force, rerender, sub_mode, variants, total)
+             for v in videos]
 
     t0 = time.time()
     results: list[dict] = []
-    done = 0
     fail = 0
+
+    def collect(r: dict) -> None:
+        nonlocal fail
+        results.append(r)
+        fail += 0 if r.get("ok") else 1
+        log.info(f"[{len(results)}/{len(tasks)}] {Path(r.get('video', '?')).name} "
+                 f"{'ok' if r.get('ok') else 'FAIL'} ({r.get('reel_count', 0)} 条)")
 
     if workers == 1:
         for t in tasks:
-            r = _worker(t)
-            results.append(r)
-            done += 1
-            fail += 0 if r.get("ok") else 1
-            log.info(f"[{done}/{len(tasks)}] {Path(r.get('video','?')).name} "
-                     f"{'ok' if r.get('ok') else 'FAIL'} ({r.get('reel_count', 0)} 条)")
+            gate.wait()
+            collect(_worker(t))
     else:
-        with ProcessPoolExecutor(max_workers=workers) as pool:
-            futures = {pool.submit(_worker, t): t[0] for t in tasks}
-            for fut in as_completed(futures):
-                r = fut.result()
-                results.append(r)
-                done += 1
-                fail += 0 if r.get("ok") else 1
-                log.info(f"[{done}/{len(tasks)}] {Path(r.get('video','?')).name} "
-                         f"{'ok' if r.get('ok') else 'FAIL'} ({r.get('reel_count', 0)} 条)")
+        # 滑动窗口：同时在跑的永远不超过 workers 部，每完成一部才补一部。
+        # 直接把所有任务 submit 进池子也能限并发，但拿到结果的顺序不可控，
+        # 且没法在「补活」这一刻做负载检查——那才是真正需要闸门的位置。
+        it = iter(tasks)
+        with ProcessPoolExecutor(
+            max_workers=workers, initializer=_init_worker,
+            initargs=(cfg.resource.nice,),
+        ) as pool:
+            pending: dict = {}
+            for t in it:
+                if len(pending) >= workers:
+                    break
+                pending[pool.submit(_worker, t)] = t
+            while pending:
+                done, _ = wait(list(pending), return_when=FIRST_COMPLETED)
+                for fut in done:
+                    pending.pop(fut, None)
+                    try:
+                        collect(fut.result())
+                    except Exception as e:      # 池子层面的异常也要隔离
+                        collect({"ok": False, "video": "?", "error": str(e)[:300]})
+                # 只在腾出槽位时补一个新任务；补之前先看负载
+                if len(pending) < workers:
+                    nxt = next(it, None)
+                    if nxt is not None:
+                        gate.wait()
+                        pending[pool.submit(_worker, nxt)] = nxt
 
     elapsed = round(time.time() - t0, 1)
     total_reels = sum(r.get("reel_count", 0) for r in results)
@@ -124,11 +160,19 @@ def run(
         "elapsed_seconds": elapsed,
         "avg_seconds_per_video": round(elapsed / max(1, len(results)), 1),
         "workers": workers,
+        "gate_wait_seconds": round(gate.waited, 1),
+        "resource": resource.snapshot(),
+        "reels_plan": (
+            {"total": total} if total else
+            {"reels": n_reels or cfg.output.reels,
+             "variants": variants or cfg.output.variants}
+        ),
         "results": [
             {
                 "video": r.get("video"),
                 "ok": r.get("ok"),
                 "reels": r.get("reel_count", 0),
+                "variants": r.get("variants"),
                 "strategy": r.get("strategy"),
                 "error": r.get("error"),
                 "outputs": [x.get("path") for x in r.get("reels", []) if x.get("ok")],
@@ -149,8 +193,9 @@ def run(
     return summary
 
 
-def watch(inputs: list[str], cfg: Config, n_reels: int = 2, interval: int = 60,
-          state_file: str | None = None) -> None:
+def watch(inputs: list[str], cfg: Config, n_reels: int | None = None,
+          interval: int = 60, state_file: str | None = None,
+          variants: int | None = None, total: int | None = None) -> None:
     """目录监听：新剧落盘就自动处理，适合挂在常驻机器上跑。"""
     state_path = Path(state_file or (Path(cfg.paths.work) / ".watched.json"))
     ensure_dir(state_path.parent)
@@ -166,7 +211,7 @@ def watch(inputs: list[str], cfg: Config, n_reels: int = 2, interval: int = 60,
         fresh = [str(v) for v in discover(inputs) if str(v.resolve()) not in seen]
         if fresh:
             log.info(f"watch: {len(fresh)} new videos")
-            run(fresh, cfg, n_reels=n_reels)
+            run(fresh, cfg, n_reels=n_reels, variants=variants, total=total)
             seen.update(str(Path(v).resolve()) for v in fresh)
             state_path.write_text(json.dumps(sorted(seen), ensure_ascii=False), encoding="utf-8")
         time.sleep(interval)

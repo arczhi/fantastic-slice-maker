@@ -32,6 +32,10 @@ def atomic_write_text(path: str | Path, text: str) -> None:
 
     临时名必须带上线程 id 和随机后缀——同一进程里多路信号是并发写
     status.json 的，只带 pid 会让两个线程互相覆盖 rename。
+
+    rename 在某些沙箱/容器环境里会被拦（Mac 上的宿主策略、只读挂载的
+    上层目录等），这时退化成直接覆盖写：丢的是原子性，不是数据。
+    这类环境里如果还硬要 rename，整个流程会在第一步就 PermissionError 崩掉。
     """
     path = Path(path)
     ensure_dir(path.parent)
@@ -40,13 +44,34 @@ def atomic_write_text(path: str | Path, text: str) -> None:
     )
     try:
         tmp.write_text(text, encoding="utf-8")
-        os.replace(tmp, path)
+        try:
+            os.replace(tmp, path)
+            return
+        except OSError as e:
+            # 放行降级：不能因为宿主拦 rename 就让整条流水线停摆
+            _warn_replace_once(e)
+            path.write_text(text, encoding="utf-8")
     finally:
         if tmp.exists():
             try:
                 tmp.unlink()
             except OSError:
                 pass
+
+
+_replace_warned = False
+
+
+def _warn_replace_once(err: OSError) -> None:
+    global _replace_warned
+    if not _replace_warned:
+        _replace_warned = True
+        try:
+            get_logger("util").warning(
+                f"rename 被环境拦截（{type(err).__name__}），改为直接覆盖写：{err}"
+            )
+        except Exception:
+            pass
 
 
 def atomic_write_json(path: str | Path, obj: Any) -> None:

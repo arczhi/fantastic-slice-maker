@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import shutil
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
@@ -29,9 +30,48 @@ def video_id_of(path: Path) -> str:
     return f"{stem}_{quick_hash(path, 1 << 19)}"
 
 
+def plan_counts(cfg: Config, n_reels: int | None = None,
+                variants: int | None = None, total: int | None = None) -> list[int]:
+    """把「出几条」翻译成每套方案的条数列表。
+
+    三种说法都支持，优先级 total > variants > reels > 配置默认：
+      --total 6      → [3, 3]（自动拆套，单套不超过 output.per_plan）
+      --variants 3   → [2, 2, 2]（每套按 output.reels）
+      --reels 2      → [2]
+    """
+    o = cfg.output
+    if total:
+        return planner.split_counts(total, o.per_plan, o.max_total)
+    n = max(1, int(n_reels or o.reels))
+    v = max(1, min(int(variants or o.variants), max(1, o.max_total)))
+    return [n] * v
+
+
+def _load_plan(work: Path, cands: list[dict], n: int, variant: int,
+               used_hooks: set[str], force: bool) -> dict | None:
+    """读缓存的剪辑单，指纹不一致就当作没有。
+
+    以前缓存文件只按视频 id 命名，改 --reels 也读回旧的 2 条方案，
+    用户要的条数和实际出片对不上。现在每个套号一个文件，文件里带指纹。
+    """
+    if force:
+        return None
+    path = work / f"plan_v{variant:02d}.json"
+    if not path.exists():
+        return None
+    data = read_json(path, {}) or {}
+    if data.get("n_reels") != n:
+        return None
+    if data.get("fp") != planner.fingerprint(cands, n, variant, used_hooks):
+        return None
+    plan = data.get("plan") or {}
+    return plan if plan.get("reels") else None
+
+
 def process(
-    video: str | Path, cfg: Config, n_reels: int = 2, force: bool = False,
+    video: str | Path, cfg: Config, n_reels: int | None = None, force: bool = False,
     rerender: bool = False, sub_mode: str | None = None,
+    variants: int | None = None, total: int | None = None,
 ) -> dict:
     video = Path(video)
     if not video.exists():
@@ -43,7 +83,8 @@ def process(
     book.data["video"] = str(video)
     if rerender:
         # 只作废渲染阶段，信号/剪辑单全部复用，方便调渲染参数时快速迭代
-        for k in [k for k in book.data["stages"] if k.startswith("render_")]:
+        for k in [k for k in book.data["stages"]
+                  if k.startswith(("render_", "mix_"))]:
             book.data["stages"].pop(k, None)
     book.save()
 
@@ -94,14 +135,47 @@ def process(
         return {"ok": False, "video": str(video), "video_id": vid, "error": "no candidates"}
 
     # ---------------------------------------------------------------- 剪辑单
-    pl = read_json(work / "plan.json") if book.ok("plan") and not force else None
-    if pl is None:
-        with book.run("plan"):
-            pl = planner.plan(cands, cfg.planner, n_reels=n_reels)
-            atomic_write_json(work / "plan.json", pl)
-    reels = pl.get("reels") or []
-    if not reels:
-        return {"ok": False, "video": str(video), "video_id": vid, "error": "planner produced no reel"}
+    # 一部剧可以出多套方案（组合式出片）：每套 2-3 条，套与套之间不复用 hook、
+    # 候选重合率也压住。这样同一部剧能连续产出多条互不撞车的切片，
+    # 而不是把一条 60 秒的片子反复重编码成 8 个近似版。
+    counts = plan_counts(cfg, n_reels=n_reels, variants=variants, total=total)
+    log.info(f"[{vid}] 出片计划：{len(counts)} 套 / 共 {sum(counts)} 条 {counts}")
+    plans: list[dict] = []
+    used_hooks: set[str] = set()
+    used_prior: list[list[str]] = []
+    for v, n in enumerate(counts, start=1):
+        pl = _load_plan(work, cands, n, v, used_hooks, force)
+        if pl is None:
+            with book.run(f"plan_{v}"):
+                pl = planner.plan(
+                    cands, cfg.planner, n_reels=n,
+                    variant=v, variants_total=len(counts),
+                    used_hooks=used_hooks, used_prior=used_prior,
+                    dedupe_hook=cfg.output.dedupe_hook,
+                    overlap_max=cfg.output.overlap,
+                )
+                atomic_write_json(work / f"plan_v{v:02d}.json", {
+                    "fp": planner.fingerprint(cands, n, v, used_hooks),
+                    "n_reels": n, "variant": v, "plan": pl,
+                })
+        vreels = pl.get("reels") or []
+        if not vreels:
+            log.warning(f"[{vid}] 第 {v} 套方案没有产出可用切片")
+        for r in vreels:
+            h = next((b["cand_id"] for b in r.get("beats") or []
+                      if b.get("role") == "hook"), "")
+            if h:
+                used_hooks.add(h)
+        used_prior.append(sorted({b["cand_id"] for r in vreels
+                                  for b in r.get("beats") or []}))
+        plans.append(pl)
+
+    # 摊平成 (套号, 套内序号, 方案) 的线性列表，后面渲染按这个顺序跑
+    reels_flat = [(v, i, r) for v, pl in enumerate(plans, start=1)
+                  for i, r in enumerate(pl.get("reels") or [], start=1)]
+    if not reels_flat:
+        return {"ok": False, "video": str(video), "video_id": vid,
+                "error": "planner produced no reel"}
 
     # ---------------------------------------------------------------- 渲染 + 质检
     day = date.today().isoformat()
@@ -121,24 +195,26 @@ def process(
         log.info(f"[{vid}] 自动补字幕：{sub_dec['reason']}，可用 ASR {len(sentences)} 句")
 
     tracks = bgm.load_index(cfg.bgm) if cfg.bgm.enabled else []
-    picks = bgm.choose(tracks, reels, cfg.planner, cfg.bgm) if tracks else []
+    flat_reels = [r for _, _, r in reels_flat]
+    picks = bgm.choose(tracks, flat_reels, cfg.planner, cfg.bgm) if tracks else []
     if tracks:
         log.info(f"[{vid}] BGM 库 {len(tracks)} 首，已为 {len(picks)} 条切片选曲")
     else:
         log.warning(f"[{vid}] 没有可用 BGM，输出无配乐版本")
 
-    for i, reel in enumerate(reels, start=1):
+    for k, (v, i, reel) in enumerate(reels_flat, start=1):
         beats = render.snap_to_shots(reel["beats"], tl.get("shots") or [])
         beats = render.trim_blank(beats, vis)
         if len(beats) < 2:
-            log.warning(f"[{vid}] reel {i} has too few usable beats, skipped")
-            results.append({"index": i, "ok": False, "error": "all beats blank after trim"})
+            log.warning(f"[{vid}] v{v} reel {i} has too few usable beats, skipped")
+            results.append({"index": i, "variant": v, "ok": False,
+                            "error": "all beats blank after trim"})
             continue
 
         # 节拍对齐必须在排序之后：对齐是按「成片时间轴」累加计算的，
         # 而 render 内部会按 role 重排，顺序不一致就白算了。
         beats = render.order_beats(beats)
-        pick = picks[i - 1] if i - 1 < len(picks) else {}
+        pick = picks[k - 1] if k - 1 < len(picks) else {}
         track = pick.get("track")
         align_stats: dict = {"aligned": False, "reason": "无可用 BGM"}
         if track:
@@ -151,22 +227,22 @@ def process(
         if sub_dec["needed"]:
             per_beat = subtitle.build(
                 sentences, beats, info, cfg.render, cfg.subtitle,
-                work / f"reel{i:02d}" / "subs",
+                work / f"v{v:02d}" / f"reel{i:02d}" / "subs",
             )
             for b, s in zip(beats, per_beat):
                 b["subs"] = s
                 sub_count += len(s)
-            log.info(f"[{vid}] reel{i} 补字 {sub_count} 条")
+            log.info(f"[{vid}] v{v} reel{i} 补字 {sub_count} 条")
 
         try:
-            with book.run(f"render_{i}"):
+            with book.run(f"render_{v}_{i}"):
                 rendered = render.render(
-                    str(video), beats, work / f"reel{i:02d}", cfg.render,
-                    has_audio=info.has_audio, tag=f"reel_{i:02d}",
+                    str(video), beats, work / f"v{v:02d}" / f"reel{i:02d}", cfg.render,
+                    has_audio=info.has_audio, tag=f"v{v:02d}_reel_{i:02d}",
                 )
         except ffmpeg.FFmpegError as e:
-            log.warning(f"[{vid}] render {i} failed: {e}")
-            results.append({"index": i, "ok": False, "error": str(e)[:300]})
+            log.warning(f"[{vid}] render v{v}-{i} failed: {e}")
+            results.append({"index": i, "variant": v, "ok": False, "error": str(e)[:300]})
             continue
 
         # 混音放在拼接之后：这样 BGM 是一条连续的曲子，
@@ -174,24 +250,29 @@ def process(
         mixed: dict = {}
         if track:
             try:
-                with book.run(f"mix_{i}"):
+                with book.run(f"mix_{v}_{i}"):
                     mixed = bgm.mix(
                         str(rendered["path"]),
-                        str(work / f"reel{i:02d}" / "mixed.mp4"),
+                        str(work / f"v{v:02d}" / f"reel{i:02d}" / "mixed.mp4"),
                         track, pick["start"], cfg.bgm,
                         has_voice=info.has_audio,
                     )
                 rendered["path"] = mixed["path"]
             except Exception as e:
-                log.warning(f"[{vid}] reel {i} 混音失败，输出无配乐版本: {e}")
+                log.warning(f"[{vid}] v{v} reel {i} 混音失败，输出无配乐版本: {e}")
 
-        title = reel.get("title") or f"{video.stem}_切片{i}"
-        stem = f"{i:02d}_{safe_name(title, 24)}"
+        title = reel.get("title") or f"{video.stem}_切片{v}-{i}"
+        stem = f"v{v:02d}-{i:02d}_{safe_name(title, 22)}"
         final = out_dir / f"{stem}.mp4"
         try:
             Path(rendered["path"]).replace(final)
         except OSError:
-            final = Path(rendered["path"])
+            # 沙箱里 rename 可能被拦，退化成复制：成片必须落在 out/ 里，
+            # 否则用户拿到的是 work/ 下的中间路径，目录一清就没了。
+            try:
+                shutil.copy2(rendered["path"], final)
+            except OSError:
+                final = Path(rendered["path"])
 
         cover = out_dir / f"{stem}.jpg"
         try:
@@ -216,7 +297,7 @@ def process(
             quality["ok"] = False
 
         results.append({
-            "index": i, "ok": True,
+            "index": i, "variant": v, "ok": True,
             "title": title,
             "hook": reel.get("hook", ""),
             "reason": reel.get("reason", ""),
@@ -224,7 +305,7 @@ def process(
             "cover": str(cover) if cover else None,
             "duration": rendered["duration"],
             "beats": rendered["timeline"],
-            "strategy": reel.get("strategy", pl.get("strategy")),
+            "strategy": reel.get("strategy", plans[v - 1].get("strategy")),
             "bgm": {
                 "id": mixed.get("bgm_id") or (track or {}).get("id"),
                 "title": mixed.get("bgm_title") or (track or {}).get("title", ""),
@@ -258,8 +339,10 @@ def process(
         "resolution": f"{info.width}x{info.height}",
         "has_audio": info.has_audio,
         "warnings": warnings,
-        "strategy": pl.get("strategy"),
-        "plan_error": pl.get("error"),
+        "strategy": plans[0].get("strategy") if plans else None,
+        "plan_error": next((p.get("error") for p in plans if p.get("error")), None),
+        "variants": len(counts),
+        "reels_per_variant": counts,
         "stats": tl.get("stats"),
         "candidate_count": len(cands),
         "autosub": {
@@ -405,7 +488,9 @@ def _write_markdown(report: dict, path: Path) -> None:
             f"- 原片：{report['duration']}s，{report['resolution']}",
             f"- 候选片段：{report['candidate_count']} 个",
             f"- 剪辑策略：{report['strategy']}",
-            f"- 产出：{report['reel_count']} 条",
+            f"- 产出：{report['reel_count']} 条"
+            + (f"（{report.get('variants', 1)} 套方案："
+               f"{report.get('reels_per_variant')}）" if report.get("variants", 1) > 1 else ""),
         ]
         sub = report.get("autosub") or {}
         if sub.get("needed"):
@@ -418,8 +503,10 @@ def _write_markdown(report: dict, path: Path) -> None:
             if not r.get("ok"):
                 lines.append(f"## 切片 {r['index']} 失败\n\n{r.get('error','')}\n")
                 continue
+            # 多套方案时把套号写进标题，否则「切片 1」会出现好几次
+            head = (f"第 {r.get('variant', 1)} 套 · " if report.get("variants", 1) > 1 else "")
             lines += [
-                f"## 切片 {r['index']}：{r['title']}",
+                f"## {head}切片 {r['index']}：{r['title']}",
                 "",
                 f"- 时长：{r['duration']}s",
                 f"- 钩子：{r['hook']}",

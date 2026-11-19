@@ -135,6 +135,7 @@ def render(
             has_audio=has_audio,
             # 自动补的字幕挂在 beat 上（pipeline 已按最终顺序算好段内时间）
             subs=b.get("subs"),
+            threads=cfg.threads,
         )
         log.info(f"  clip {i}: {b['role']:7s} {b['start']:.1f}-{b['end']:.1f}s -> {dst.name}")
         return dst

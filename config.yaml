@@ -69,6 +69,29 @@ planner:
   min_seconds: 32
   max_seconds: 95
 
+# 出片数量。同一部剧可以出多套互不重复的方案（组合式批量出片）：
+#   --total 6      → 自动拆成 3+3 两套
+#   --variants 3   → 3 套，每套 output.reels 条
+#   --reels 3      → 1 套 3 条
+output:
+  reels: 2
+  variants: 1
+  per_plan: 3        # 指定总条数时单套最多几条（一次要 4 条以上，模型会开始凑数）
+  max_total: 12      # 单部剧总条数上限
+  dedupe_hook: true  # 跨套不复用同一段 hook
+  overlap: 0.6       # 与已出方案的候选重合率超过此值即驳回重出
+
+# 跑批时的资源闸门。目标是「机器不限速」，而不是「尽快跑完」：
+# 并发按核数与可用内存推算，负载越线就暂停派活，子进程统一降 nice。
+resource:
+  max_workers: 0            # 0 = 自动（10 核 32GB 实测稳定在 2-3）
+  cpu_per_worker: 3         # 每部剧内部本身就有 3 路信号 + 3 线程 ffmpeg
+  mem_per_worker_gb: 2.5
+  min_free_mem_gb: 3.0
+  max_load_per_core: 1.2
+  nice: 5
+  gate_max_wait: 180
+
 render:
   width: 1080
   height: 1920

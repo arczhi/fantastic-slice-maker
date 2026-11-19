@@ -5,8 +5,10 @@
 四路信号并行提取 → 规则召回候选 → DeepSeek 出剪辑单 → FFmpeg 执行并卡点配乐。全程无交互，一条命令跑完一批。
 
 ```bash
-./bin/fsm batch ~/Videos/漫剧素材 --reels 2 --workers 3
+./bin/fsm batch ~/Videos/漫剧素材 --total 3 --workers 2
 ```
+
+同一部剧可以出多套互不重复的方案：`--total 6` 会拆成两套、跨套不复用 hook，得到 6 条真正不同的切片。
 
 ```
 视频
@@ -124,16 +126,16 @@ export DEEPSEEK_API_KEY=sk-...
 ### 给 Agent 的建议
 
 - **不要一上来 `--force`**。默认的断点续跑能省掉大部分时间；只有改了 `config.yaml` 里的信号参数才需要 `--force`。
-- **批量并发别超过 3**。ASR 服务内部是串行的，`--workers` 再高只会让各阶段互相抢核，实测反而更慢。
+- **并发交给流水线自己算**。默认按「核数 / 可用内存」推算安全并发（10 核 32GB 上落在 2-3），每完成一部才补下一部，负载或内存越线会暂停派活，子进程统一降 nice。要更保守用 `--workers 1 --max-load 0.8 --min-free-mem 6`，不要靠 `--workers 8` 抢时间（ASR 服务内部串行，多开只会互相抢核）。
 - **别用 `watch` 做一次性任务**。它是常驻进程，agent 调用会永久阻塞。
 - **长素材先估时间**再加超时，见下面的「性能与容量」。
-- 仓库内附了一个 skill（`skills/fsm-slicer/`），把整个流程封装成可被 agent 直接加载的操作手册，见该目录的 `SKILL.md`。
+- 仓库内附了一个 skill（`skills/fsm-slicer/`），把「找剧 → 下载 → 切片 → 交付」整个流程封装成可被 agent 直接加载的操作手册，见该目录的 `SKILL.md`。
 
 ## 命令
 
 ```bash
-./bin/fsm doctor                                    # 环境自检
-./bin/fsm run <video> [--reels N]                   # 单条
+./bin/fsm doctor                                    # 环境自检（含本机安全并发数）
+./bin/fsm run <video> [--total N]                   # 单条，N 条自动拆套
 ./bin/fsm batch <dir|files...> [--workers N] [--limit N]
 ./bin/fsm watch <dir> [--interval 60]               # 常驻监听新片
 ./bin/fsm bgm                                       # 构建/更新本地 BGM 曲库
@@ -144,7 +146,12 @@ export DEEPSEEK_API_KEY=sk-...
 | 参数 | 作用 |
 |---|---|
 | `--config PATH` | 额外配置层（默认已叠加 `config.yaml` + `config.local.yaml`） |
-| `--reels N` | 每部剧出几条切片，默认 2 |
+| `--total N` | 直接要 N 条，自动拆成多套方案（6 → 3+3，7 → 3+2+2） |
+| `--variants V` | 出 V 套方案，每套 `--reels` 条 |
+| `--reels N` | 每套几条，默认取 `output.reels`（2） |
+| `--max-load X` | 单核负载上限，超过暂停派活（默认 1.2） |
+| `--min-free-mem G` | 可用内存下限 GB，低于此值暂停派活（默认 3） |
+| `--nice N` | 子进程降优先级幅度，默认 5 |
 | `--force` | 忽略 `work/` 中间产物，全部重算 |
 | `--rerender` | 只重跑渲染与质检，复用信号与剪辑单 |
 | `--limit N` | 批量时只跑前 N 部（调试用） |
@@ -155,6 +162,12 @@ export DEEPSEEK_API_KEY=sk-...
 
 **竖屏用模糊背景而不是裁切**
 原片的中文字幕是烧死在画面里的，任何放大裁切都会切掉字幕。所以取原比例居中、上下用自身模糊填充，字幕 100% 保留。
+
+**同一部剧出多套方案，而不是把一套方案重复渲染**
+`--total 6` 不会把一份剪辑单渲染六次。它拆成两套独立规划：第二套拿到的是「第一套已用过的 hook 和候选」这一份排除清单，撞 hook 直接驳回，候选重合率 ≥60% 也驳回。代价是多几次模型调用，换来的是六条能同时投出去、不会被判重复内容的片子。单套最多 3 条是实测出来的：一次要 4 条以上，模型后半段就开始凑数了。
+
+**跑批按设备资源调度，而不是按任务数量**
+并发上限 = min(核数/3, 可用内存/2.5GB)，再被 `--workers` 压一层。每完成一部才补下一部，补之前检查实时负载与可用内存，越线就暂停（最长等 180 秒后放行，避免死等）。子进程 `nice 5`，单段 x264 限 3 线程。目标是「跑批时机器还能正常用」，不是「最快跑完」。
 
 **源片没字幕时自动补**
 部分短剧不带内嵌字幕（实测《少夫人来自东北3》OCR 覆盖率只有 3.3%，有字幕的片子都在 20% 以上）。补不补按**覆盖率**判定而不是条数：无字幕片里 OCR 仍会零星抓到台标、集数标题和「恭喜少夫人」这类画面文字，按条数判断会误以为是字幕。
@@ -211,7 +224,7 @@ ASR 给的是「这句话 12.4-15.8s」，但观众感知的是镜头。切在�
 
 其他限制：
 
-- **素材必须有音轨。** 源片没有音轨时 ASR 拿不到输入，剪辑单只能靠画面和 OCR 猜，成片也不可避免地只剩配乐。这种情况 `report.has_audio` 为 `false`、`warnings` 会写明原因、每条 `reels[].qc.ok` 一律判 false，不会静默交付。下载素材时注意格式选择器要带音频流（yt-dlp 用 `-f "bv*[height<=480]+ba/b"`，只写 `bv*` 会丢音轨）。
+- **素材必须有音轨。** 源片没有音轨时 ASR 拿不到输入，剪辑单只能靠画面和 OCR 猜，成片也不可避免地只剩配乐。这种情况 `report.has_audio` 为 `false`、`warnings` 会写明原因、每条 `reels[].qc.ok` 一律判 false，不会静默交付。下载素材时**视频流与音频流分开取再合并**（`yt-dlp -f 135` + `-f 140`，然后 `ffmpeg -map 0:v -map 1:a -c copy`）：`-f "bv*[height<=480]/b"` 这类写法很容易只命中纯视频流，下完就是一部哑片。具体命令见 `skills/fsm-slicer/references/download.md`。
 - 文本质量取决于 ASR/OCR 准确度。配乐重、口音重、画质差的素材会掉字，此时退化为视觉选片。自动补字幕的字幕文字也来自 ASR，专有名词和英文会错（实测 `royal college of art` 被识别成 `arart`），介意的话用 `--subtitle off` 关掉。
 - 叙事连贯性靠模型判断，不保证逻辑严密。`strategy=fallback` 时只保证片段好看。
 - 节拍对齐只把片段尾部延长到鼓点，没有做严格的「片段时长 = 鼓点整数倍」卡点（那要求按 BPM 反推选片时长，会牺牲台词完整性）。
@@ -281,6 +294,13 @@ out/<日期>/        成片 + report.json + 总览页 index.html
 | `subtitle.max_chars` | 15 | 单行最多字数（中文按 1、ASCII 按 0.5 计宽） |
 | `subtitle.size` | 58 | 字号（1080 宽画布） |
 | `render.preset` | veryfast | 编码速度，追求质量改 `medium` |
+| `render.threads` | 3 | 单段 x264 线程数，与并发数相乘别超核数 |
+| `output.per_plan` | 3 | 指定总条数时单套最多几条（一次要 4 条以上模型会开始凑数） |
+| `output.max_total` | 12 | 单部剧总条数上限 |
+| `output.overlap` | 0.6 | 跨套候选重合率超过此值即驳回重出 |
+| `resource.cpu_per_worker` | 3 | 每个 worker 期望占用核数，用于推算安全并发 |
+| `resource.max_load_per_core` | 1.2 | 负载红线，越线暂停派活 |
+| `resource.min_free_mem_gb` | 3.0 | 可用内存红线 |
 | `ocr.fps` | 2.0 | 抽帧频率，降到 1.5 省 25% |
 | `bgm.enabled` | true | 关掉等于 `--no-bgm` |
 | `workers` | 3 | 同时处理的剧数 |
