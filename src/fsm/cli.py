@@ -86,6 +86,8 @@ def cmd_run(args) -> int:
         "ok": rep.get("ok"),
         "video": rep.get("video"),
         "error": rep.get("error"),
+        "has_audio": rep.get("has_audio"),
+        "warnings": rep.get("warnings") or [],
         "strategy": rep.get("strategy"),
         "reels": [
             {"title": r.get("title"), "path": r.get("path"),

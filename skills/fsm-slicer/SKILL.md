@@ -138,6 +138,7 @@ for r in d['results']:
 
 | 现象 | 原因与处理 |
 |---|---|
+| 成片只有配乐、没有原声 | 源片本身没有音轨（下载时格式只取了视频流）。先 `ffprobe -select_streams a 素材.mp4` 确认，再带 `+ba` 重下。`report.has_audio=false` 与 `warnings` 会同时给出提示，此时 `reels[].qc.ok` 一律为 false |
 | `planner produced no reel` | 素材太短，候选凑不齐 4 段。换更长的素材，或 `--no-llm` 走规则兜底 |
 | `QC 未通过: 太短` | 成片不足 32 秒。素材本身就没有足够可剪内容，属正常拒绝 |
 | ASR 阶段 20s~150s 抖动 | ASR 服务串行，多部并发在排队。正常现象，不是卡死 |

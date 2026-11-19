@@ -83,6 +83,8 @@ fsm bgm
   "video_id": "ep_a1b2c3d4",          // 原名 + 路径 hash 前 16 位
   "duration": 237.74,
   "resolution": "1280x720",
+  "has_audio": true,                   // false = 源片无音轨，此时 ASR 无输入、成片只有配乐
+  "warnings": [],                      // 非空要原样转告用户，例如「源视频无音轨」
   "strategy": "llm",                   // llm | fallback
   "plan_error": null,                  // 非空表示首次调用失败后重试成功
   "stats": {

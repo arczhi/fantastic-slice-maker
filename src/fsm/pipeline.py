@@ -56,6 +56,16 @@ def process(
               size=f"{info.width}x{info.height}", fps=round(info.fps, 2))
     log.info(f"[{vid}] {video.name} {info.duration:.1f}s {info.width}x{info.height}")
 
+    # 源片没有音轨是致命的前置问题：ASR 拿不到输入，剪辑单只能靠画面和
+    # OCR 猜，成片里也永远不会有任何人声。以前这里只是把 asr 标记成 failed
+    # 就继续往下跑，结果渲染出一条「只有配乐」的片子，QC 还判通过——
+    # 所以要在这里就把话说明白，并一路带到 report 里。
+    warnings: list[str] = []
+    if not info.has_audio:
+        msg = "源视频无音轨：ASR 无输入，成片只有配乐、没有人声"
+        log.error(f"[{vid}] {msg}")
+        warnings.append(msg)
+
     # ---------------------------------------------------------------- 信号（并行）
     shots, vis, sentences, strips = _signals(video, info, work, book, cfg, force)
 
@@ -198,6 +208,13 @@ def process(
         except Exception as e:
             quality = {"ok": False, "issues": [f"qc crashed: {e}"]}
 
+        # QC 只查「有没有音轨」，查不出「音轨里只有配乐」。源片无声时
+        # 成片照样有 aac 流、响度也正常（BGM 撑着），所以必须显式判死，
+        # 否则这种片子会被当成合格品投出去。
+        if not info.has_audio:
+            quality["issues"].append("源片无音轨，成片无人声")
+            quality["ok"] = False
+
         results.append({
             "index": i, "ok": True,
             "title": title,
@@ -239,6 +256,8 @@ def process(
         "video_id": vid,
         "duration": round(info.duration, 2),
         "resolution": f"{info.width}x{info.height}",
+        "has_audio": info.has_audio,
+        "warnings": warnings,
         "strategy": pl.get("strategy"),
         "plan_error": pl.get("error"),
         "stats": tl.get("stats"),
