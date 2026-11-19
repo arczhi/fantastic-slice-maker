@@ -2,7 +2,12 @@
 name = "fantastic-slice-maker"
 version = "0.1.0"
 description = "漫剧高光切片全自动流水线：四路信号 + DeepSeek 剪辑单 + 竖屏合成"
+license = { text = "Apache-2.0" }
 requires-python = ">=3.11"
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+]
 dependencies = [
     "numpy>=1.26",
     "opencv-python-headless>=4.9",

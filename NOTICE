@@ -1,0 +1,24 @@
+fantastic-slice-maker
+Copyright 2026 arczhi
+
+This product is licensed under the Apache License, Version 2.0.
+See the LICENSE file for the full text.
+
+---
+
+Third-party components and assets:
+
+1. BGM tracks downloaded by `./bin/fsm bgm` from incompetech.com are NOT
+   covered by this license and are NOT distributed with this repository.
+   They are licensed under CC BY 4.0 by Kevin MacLeod and require attribution
+   when used commercially. The attribution string is recorded in
+   assets/bgm_index.json under each track's `attribution` field.
+
+2. Python dependencies (numpy, opencv-python-headless, onnxruntime,
+   rapidocr-onnxruntime, scenedetect, requests, pyyaml, and the optional
+   librosa/soundfile) carry their own licenses. Refer to each package's
+   metadata.
+
+3. Optional external models are not distributed with this repository:
+   - FunASR Paraformer (ModelScope, Apache-2.0 / MIT components)
+   - PaddleOCR PP-OCRv4 ONNX weights (Apache-2.0)

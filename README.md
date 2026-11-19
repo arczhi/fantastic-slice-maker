@@ -270,4 +270,6 @@ out/<日期>/        成片 + report.json + 总览页 index.html
 
 ## License
 
-MIT，见 [LICENSE](LICENSE)。BGM 曲目另行遵循 CC BY 4.0，不入库。
+[Apache License 2.0](LICENSE)，附专利授权条款。分发时请保留 [NOTICE](NOTICE)、并在修改过的文件里注明改动。
+
+BGM 曲目不在本协议范围内：它们由 Kevin MacLeod 以 CC BY 4.0 授权，不入库，商用需署名。
