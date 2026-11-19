@@ -29,6 +29,10 @@ def _build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--no-ocr", action="store_true")
         sp.add_argument("--no-llm", action="store_true", help="跳过 DeepSeek，用规则兜底")
         sp.add_argument("--no-bgm", action="store_true", help="不混入背景音乐")
+        sp.add_argument(
+            "--subtitle", choices=["auto", "on", "off"], default="auto",
+            help="自动补字幕：auto=源片无字幕时才补（默认），on=强制补，off=不补",
+        )
 
     sp = sub.add_parser("run", help="处理单个视频")
     sp.add_argument("video")
@@ -75,7 +79,7 @@ def cmd_run(args) -> int:
     _ensure_asr(cfg, wait=False)
     try:
         rep = process(args.video, cfg, n_reels=args.reels, force=args.force,
-                      rerender=args.rerender)
+                      rerender=args.rerender, sub_mode=args.subtitle)
     finally:
         _stop_asr(cfg)
     print(json.dumps({
@@ -100,7 +104,7 @@ def cmd_batch(args) -> int:
         summary = batch.run(
             args.inputs, cfg, n_reels=args.reels,
             workers=args.workers, force=args.force, limit=args.limit,
-            rerender=args.rerender,
+            rerender=args.rerender, sub_mode=args.subtitle,
         )
     finally:
         _stop_asr(cfg)
@@ -182,6 +186,14 @@ def cmd_doctor(args) -> int:
 
     key = cfg.planner.api_key or os.environ.get(cfg.planner.api_key_env, "")
     rows.append(("DeepSeek key", bool(key), (key[:8] + "..." + key[-4:]) if len(key) > 14 else ("set" if key else "missing")))
+
+    # 补字幕要能渲染中文，字体缺失时字幕会整条静默跳过
+    if cfg.subtitle.mode != "off":
+        from .subtitle import _font_path
+
+        fp = _font_path(cfg.subtitle.font)
+        note = Path(fp).name if fp else "找不到中文字体，请设 subtitle.font"
+        rows.append(("字幕字体", bool(fp), note))
 
     index = Path(cfg.bgm.index)
     if index.exists():

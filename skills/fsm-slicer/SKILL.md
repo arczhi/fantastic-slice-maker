@@ -93,6 +93,8 @@ $FSM/bin/fsm batch /abs/path/to/dir --reels 2 --workers 3
 | 没装 FunASR | `--no-asr` |
 | 不要配乐 | `--no-bgm` |
 | 不想调模型（省钱/离线） | `--no-llm` |
+| 源片没字幕、要补 | 默认 `--subtitle auto` 会自动判断；不确定就加 `on` 强制补 |
+| 补出来的字幕有错字 | `--subtitle off` 关掉，只保留源片自带字幕 |
 
 ## 步骤 5：读结果
 
@@ -117,6 +119,8 @@ for r in d['results']:
 - `reels[].path` 成片路径，`reels[].cover` 封面
 - `reels[].title` / `hook` / `reason` / `beats[]` 剪辑理由，可直接做文案
 - `reels[].qc.ok` 质检是否通过，`issues[]` 说明问题
+- `reels[].subtitle` 该条是否补了字幕、补了几条
+- `autosub.needed` / `autosub.coverage` 整部剧的字幕判定：源片自带字幕就沿用，OCR 覆盖率低于 12% 才会用 ASR 自动补（`--subtitle auto` 默认行为）
 - `reels[].bgm.attribution` BGM 署名，**交付时要一并给用户**（CC BY 4.0 商用需署名）
 - `strategy` 为 `fallback` 时说明模型没出单、走了规则兜底，切片只保证好看不保证连贯
 
@@ -139,6 +143,8 @@ for r in d['results']:
 | ASR 阶段 20s~150s 抖动 | ASR 服务串行，多部并发在排队。正常现象，不是卡死 |
 | 渲染很慢 | 检查是否同时跑了多批。`--workers` 降到 2 |
 | `Brokered host rename overwrite refused` | 输出目录被宿主沙箱拦截，换一个可写目录或放宽权限 |
+| 字幕飘到模糊背景上 / 压得太高 | 源片比例异常导致画面区算偏。调 `subtitle.bottom_pct`（调大更贴底边）或 `subtitle.size` |
+| 有字幕的片子被补了第二层字幕 | 该片 OCR 覆盖率异常低（水印多、字幕是图片）。`--subtitle auto` 判低才会补，误判时用 `--subtitle off` |
 | 全片黑场误判 | 片尾字幕卡会被 blackdetect 抓到，已被 `_trim_blank` 处理；仍有问题看 `qc.issues` |
 
 ## 不要做

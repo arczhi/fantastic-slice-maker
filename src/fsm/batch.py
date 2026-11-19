@@ -43,13 +43,14 @@ def discover(inputs: list[str]) -> list[Path]:
     return uniq
 
 
-def _worker(args: tuple[str, dict, int, bool, bool]) -> dict:
-    video, cfg_dict, n_reels, force, rerender = args
+def _worker(args: tuple[str, dict, int, bool, bool, str | None]) -> dict:
+    video, cfg_dict, n_reels, force, rerender, sub_mode = args
     from . import config as cfg_mod
 
     cfg = cfg_mod.load(overrides=_strip(cfg_dict))
     try:
-        return process(video, cfg, n_reels=n_reels, force=force, rerender=rerender)
+        return process(video, cfg, n_reels=n_reels, force=force,
+                       rerender=rerender, sub_mode=sub_mode)
     except Exception as e:  # 单剧崩了不能拖垮批次
         import traceback
 
@@ -61,7 +62,7 @@ def _worker(args: tuple[str, dict, int, bool, bool]) -> dict:
 
 def _strip(cfg_dict: dict) -> dict:
     """只保留可覆盖的字段，避免把 paths/workers 这类运行时字段传乱。"""
-    keep = {"asr", "ocr", "vision", "recall", "planner", "render"}
+    keep = {"asr", "ocr", "vision", "recall", "planner", "render", "bgm", "subtitle"}
     out = {k: v for k, v in cfg_dict.items() if k in keep}
     for k in out:
         if isinstance(out[k], dict):
@@ -72,7 +73,7 @@ def _strip(cfg_dict: dict) -> dict:
 def run(
     inputs: list[str], cfg: Config, n_reels: int = 2,
     workers: int | None = None, force: bool = False, limit: int | None = None,
-    rerender: bool = False,
+    rerender: bool = False, sub_mode: str | None = None,
 ) -> dict:
     videos = discover(inputs)
     if limit:
@@ -85,7 +86,7 @@ def run(
     log.info(f"batch: {len(videos)} videos, workers={workers}, reels/video={n_reels}")
 
     cfg_dict = {k: v for k, v in cfg.to_dict().items()}
-    tasks = [(str(v), cfg_dict, n_reels, force, rerender) for v in videos]
+    tasks = [(str(v), cfg_dict, n_reels, force, rerender, sub_mode) for v in videos]
 
     t0 = time.time()
     results: list[dict] = []

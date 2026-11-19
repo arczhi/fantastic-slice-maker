@@ -11,7 +11,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from . import bgm, digest, ffmpeg, planner, qc, recall, render, timeline
+from . import bgm, digest, ffmpeg, planner, qc, recall, render, subtitle, timeline
 from .config import Config
 from .signals import asr as asr_sig
 from .signals import ocr as ocr_sig
@@ -31,7 +31,7 @@ def video_id_of(path: Path) -> str:
 
 def process(
     video: str | Path, cfg: Config, n_reels: int = 2, force: bool = False,
-    rerender: bool = False,
+    rerender: bool = False, sub_mode: str | None = None,
 ) -> dict:
     video = Path(video)
     if not video.exists():
@@ -99,6 +99,17 @@ def process(
     results: list[dict] = []
     produced: set[str] = set()      # 本批次实际产出的文件，用于清理历史残留
 
+    # ---------------------------------------------------------------- 自动补字幕
+    # 判定用整部剧的 OCR 字幕覆盖率，不逐条切片判定：同一部剧不该出现
+    # 「这条有字幕、那条没有」。覆盖率比条数可靠——无字幕片里 OCR 仍会
+    # 零星抓到台标、集数标题和画面招牌。
+    sub_dec = subtitle.decide(strips, info.duration, cfg.subtitle, sub_mode)
+    if sub_dec["needed"] and not sentences:
+        log.warning(f"[{vid}] 需要补字幕但没有 ASR 句子，跳过")
+        sub_dec["needed"] = False
+    if sub_dec["needed"]:
+        log.info(f"[{vid}] 自动补字幕：{sub_dec['reason']}，可用 ASR {len(sentences)} 句")
+
     tracks = bgm.load_index(cfg.bgm) if cfg.bgm.enabled else []
     picks = bgm.choose(tracks, reels, cfg.planner, cfg.bgm) if tracks else []
     if tracks:
@@ -123,6 +134,19 @@ def process(
         if track:
             beats, align_stats = bgm.align_to_beats(
                 beats, track, pick["start"], cfg.bgm, vis)
+
+        # 字幕必须在 align 之后算：align_to_beats 会把段尾延长到鼓点，
+        # 用延长前的区间算字幕会漏掉最后一两句台词。
+        sub_count = 0
+        if sub_dec["needed"]:
+            per_beat = subtitle.build(
+                sentences, beats, info, cfg.render, cfg.subtitle,
+                work / f"reel{i:02d}" / "subs",
+            )
+            for b, s in zip(beats, per_beat):
+                b["subs"] = s
+                sub_count += len(s)
+            log.info(f"[{vid}] reel{i} 补字 {sub_count} 条")
 
         try:
             with book.run(f"render_{i}"):
@@ -193,6 +217,7 @@ def process(
                 "attribution": mixed.get("attribution") or (pick.get("attribution") if track else ""),
             },
             "beat_align": align_stats,
+            "subtitle": {"auto": sub_count > 0, "count": sub_count},
             "qc": quality,
         })
 
@@ -218,6 +243,11 @@ def process(
         "plan_error": pl.get("error"),
         "stats": tl.get("stats"),
         "candidate_count": len(cands),
+        "autosub": {
+            "needed": sub_dec["needed"],
+            "coverage": sub_dec["coverage"],
+            "reason": sub_dec["reason"],
+        },
         "reels": results,
         "reel_count": len(ok_reels),
         "elapsed_stages": {k: v for k, v in book.data["stages"].items()},
@@ -357,8 +387,14 @@ def _write_markdown(report: dict, path: Path) -> None:
             f"- 候选片段：{report['candidate_count']} 个",
             f"- 剪辑策略：{report['strategy']}",
             f"- 产出：{report['reel_count']} 条",
-            "",
         ]
+        sub = report.get("autosub") or {}
+        if sub.get("needed"):
+            lines.append(f"- 字幕：源片无内嵌字幕（OCR 覆盖率 "
+                         f"{sub.get('coverage', 0):.1%}），已用 ASR 自动补字")
+        elif sub:
+            lines.append(f"- 字幕：沿用源片内嵌字幕（覆盖率 {sub.get('coverage', 0):.1%}）")
+        lines.append("")
         for r in report["reels"]:
             if not r.get("ok"):
                 lines.append(f"## 切片 {r['index']} 失败\n\n{r.get('error','')}\n")

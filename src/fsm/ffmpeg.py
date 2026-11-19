@@ -168,28 +168,44 @@ def cut(
     *, width: int, height: int, fps: int, crf: int, preset: str,
     loudness_i: float, blur_sigma: int, audio_bitrate: str,
     timeout: int = 600, has_audio: bool = True,
+    subs: list[dict] | None = None,
 ) -> Path:
     """精确切片 + 竖屏改装（上下模糊，保留原画面完整不被裁切）。
 
     关键点：原片已烧字幕，绝不能裁切画面，否则字幕会被切掉。
     所以用「模糊背景铺满 + 原比例居中」而不是 force_original_aspect_ratio=increase + crop。
+
+    subs 是自动补的字幕条 [{png, start, end, y}]，start/end 为**段内相对时间**。
+    用 overlay + enable 叠加静态 PNG，和切片同一次编码完成，不额外损失画质。
     """
     dst = Path(dst)
     dst.parent.mkdir(parents=True, exist_ok=True)
     dur = max(0.2, end - start)
+    subs = subs or []
 
     vf = (
         f"split=2[bg][fg];"
         f"[bg]scale={width}:{height}:force_original_aspect_ratio=increase,"
         f"crop={width}:{height},gblur=sigma={blur_sigma}[bgb];"
         f"[fg]scale={width}:-2:force_original_aspect_ratio=decrease[fgs];"
-        f"[bgb][fgs]overlay=(W-w)/2:(H-h)/2,"
-        f"fps={fps},format=yuv420p[v]"
+        f"[bgb][fgs]overlay=(W-w)/2:(H-h)/2[base]"
     )
+    cur = "base"
+    for i, s in enumerate(subs):
+        nxt = f"sub{i}"
+        vf += (
+            f";[{cur}][{i + 1}:v]overlay=0:{int(s['y'])}:"
+            f"enable='between(t,{s['start']:.3f},{s['end']:.3f})'[{nxt}]"
+        )
+        cur = nxt
+    vf += f";[{cur}]fps={fps},format=yuv420p[v]"
+
     cmd = [
         "ffmpeg", "-v", "error", "-y",
         "-ss", f"{start:.3f}", "-t", f"{dur:.3f}", "-i", str(src),
     ]
+    for s in subs:
+        cmd += ["-i", str(s["png"])]
     if has_audio:
         cmd += [
             "-filter_complex", f"[0:v]{vf};[0:a]aresample=async=1,loudnorm=I={loudness_i}:TP=-1.5:LRA=11[a]",

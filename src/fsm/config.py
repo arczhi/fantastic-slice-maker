@@ -149,6 +149,19 @@ class RenderCfg:
 
 
 @dataclass
+class SubtitleCfg:
+    auto_fill: bool = True            # 源片无字幕时自动补
+    mode: str = "auto"                # auto | on | off
+    coverage_threshold: float = 0.12  # 字幕覆盖率低于此值视为「源片无字幕」
+    font: str = ""                    # 留空自动探测系统中文字体
+    size: int = 58
+    max_chars: int = 15               # 单行最多字数（中文按 1、ASCII 按 0.5 计宽）
+    bottom_pct: float = 0.06          # 字幕底边距原画面底部比例
+    stroke: int = 3
+    min_cue: float = 0.55
+
+
+@dataclass
 class PathsCfg:
     work: str = str(PROJECT_ROOT / "work")
     out: str = str(PROJECT_ROOT / "out")
@@ -164,6 +177,7 @@ class Config:
     planner: PlannerCfg = field(default_factory=PlannerCfg)
     render: RenderCfg = field(default_factory=RenderCfg)
     bgm: BGMCfg = field(default_factory=BGMCfg)
+    subtitle: SubtitleCfg = field(default_factory=SubtitleCfg)
     paths: PathsCfg = field(default_factory=PathsCfg)
     workers: int = 3                 # 同时处理的剧数
     force: bool = False

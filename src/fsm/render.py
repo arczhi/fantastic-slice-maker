@@ -133,6 +133,8 @@ def render(
             loudness_i=cfg.loudness_i, blur_sigma=cfg.blur_sigma,
             audio_bitrate=cfg.audio_bitrate, timeout=cfg.timeout,
             has_audio=has_audio,
+            # 自动补的字幕挂在 beat 上（pipeline 已按最终顺序算好段内时间）
+            subs=b.get("subs"),
         )
         log.info(f"  clip {i}: {b['role']:7s} {b['start']:.1f}-{b['end']:.1f}s -> {dst.name}")
         return dst

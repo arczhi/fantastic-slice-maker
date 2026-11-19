@@ -7,7 +7,7 @@
 ```
 fsm [--config PATH] [--verbose] <子命令>
 
-fsm run    <video>            [--reels N] [--force] [--rerender] [--no-asr] [--no-ocr] [--no-llm] [--no-bgm]
+fsm run    <video>            [--reels N] [--force] [--rerender] [--no-asr] [--no-ocr] [--no-llm] [--no-bgm] [--subtitle auto|on|off]
 fsm batch  <inputs...>        [--workers N] [--limit N] [--reels N] [同上开关]
 fsm watch  <inputs...>        [--interval 60] [--reels N]
 fsm doctor
@@ -90,6 +90,11 @@ fsm bgm
     "subtitle_count": 42, "blank_ratio": 0.0074, "motion_p95": 38.38
   },
   "candidate_count": 11,               // 进入大模型的候选数
+  "autosub": {                          // 自动补字幕的判定结果
+    "needed": false,                    // 源片自带字幕 → false，成片保持原样
+    "coverage": 0.358,                  // OCR 字幕覆盖率（有字幕片 20%-78%，无字幕片 <5%）
+    "reason": "源片自带字幕（覆盖率 35.8%）"
+  },
   "reel_count": 1,
   "reels": [{
     "index": 1,
@@ -117,6 +122,7 @@ fsm bgm
       "stretch_seconds": 0.68, "max_stretch_used": 0.33,
       "mean_residual": 0.37, "bpm": 83.4, "beat_cv": 0.061
     },
+    "subtitle": { "auto": false, "count": 0 },   // 该条是否补了字幕、补了几条
     "qc": {
       "ok": true, "issues": [],
       "duration": 43.74, "resolution": "1080x1920",

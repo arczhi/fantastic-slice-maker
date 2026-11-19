@@ -78,3 +78,17 @@ render:
   loudness_i: -14
   blur_sigma: 24
   audio_bitrate: 192k
+
+# 自动补字幕：源片没有内嵌字幕时（OCR 字幕覆盖率低），用 ASR 句子生成字幕烧进成片。
+# 本机 ffmpeg 是精简构建（无 libass），所以走 PIL 渲染 PNG + overlay，
+# 不依赖 subtitles/drawtext 滤镜。
+subtitle:
+  auto_fill: true
+  mode: auto               # auto | on | off
+  coverage_threshold: 0.12 # 字幕覆盖率低于此值视为源片无字幕
+  font: ""                 # 留空自动探测系统中文字体
+  size: 58
+  max_chars: 15
+  bottom_pct: 0.06
+  stroke: 3
+  min_cue: 0.55
