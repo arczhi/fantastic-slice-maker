@@ -1,0 +1,27 @@
+# 私有配置（含 API key）
+config.local.yaml
+*.local.yaml
+
+# 运行产物
+work/
+out/
+logs/
+probe/
+
+# BGM 曲库（mp3 体积大且有独立授权，按需本地构建：./bin/fsm bgm）
+assets/bgm/
+assets/_catalog/
+
+# 本地模型权重
+models/*.onnx
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+dist/
+*.egg-info/
+
+# macOS
+.DS_Store
