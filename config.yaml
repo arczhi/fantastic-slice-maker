@@ -118,6 +118,17 @@ render:
   cpu_slots: 2
   gpu_slots: 2
   vt_bitrate: 6M          # 硬编只能定码率，画质随内容波动
+  # 源片自带搬运水印时的处理。实测 45 秒切片：off 4.67s / crop 4.47s / delogo 4.56s，
+  # 三者都在噪声范围内，开去水印基本不花时间。
+  # crop 裁掉顶部一条再缩放，效果最干净；delogo 原地插值，画面不损失但文字水印会留灰斑。
+  # 水印位置随源而变（台标常右上、账号名常在左上且横向拉很长），换源要重新量 crop_ratio。
+  dewatermark:
+    mode: "off"           # off | crop | delogo（必须带引号，否则 YAML 会当布尔）
+    crop_ratio: 0.06      # crop：裁掉顶部占源高的比例
+    x: 0                  # delogo 区域，源分辨率坐标
+    y: 0
+    w: 0
+    h: 0
 
 # 自动补字幕：源片没有内嵌字幕时（OCR 字幕覆盖率低），用 ASR 句子生成字幕烧进成片。
 # 本机 ffmpeg 是精简构建（无 libass），所以走 PIL 渲染 PNG + overlay，

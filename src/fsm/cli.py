@@ -38,6 +38,16 @@ def _build_parser() -> argparse.ArgumentParser:
             "--subtitle", choices=["auto", "on", "off"], default="auto",
             help="自动补字幕：auto=源片无字幕时才补（默认），on=强制补，off=不补",
         )
+        sp.add_argument(
+            "--dewatermark", choices=["off", "crop", "delogo"], default=None,
+            help="去水印：crop=裁掉顶部一条再缩放（零开销，推荐）；"
+                 "delogo=原地插值修复（画面不损失，但文字水印会留灰斑）；"
+                 "默认取 config.render.dewatermark.mode",
+        )
+        sp.add_argument(
+            "--crop-ratio", type=float, default=None,
+            help="crop 模式裁掉的顶部比例，默认取 config（0.06）",
+        )
         sp.add_argument("--max-load", type=float, default=None,
                         help="单核负载上限，超过就暂停派活（默认取 config resource）")
         sp.add_argument("--min-free-mem", type=float, default=None,
@@ -82,6 +92,10 @@ def _cfg(args) -> cfg_mod.Config:
         overrides.setdefault("resource", {})["min_free_mem_gb"] = args.min_free_mem
     if getattr(args, "nice", None) is not None:
         overrides.setdefault("resource", {})["nice"] = args.nice
+    if getattr(args, "dewatermark", None):
+        overrides.setdefault("render", {}).setdefault("dewatermark", {})["mode"] = args.dewatermark
+    if getattr(args, "crop_ratio", None) is not None:
+        overrides.setdefault("render", {}).setdefault("dewatermark", {})["crop_ratio"] = args.crop_ratio
     return cfg_mod.load(getattr(args, "config", None), overrides)
 
 

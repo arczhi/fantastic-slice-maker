@@ -146,6 +146,31 @@ class PlannerCfg:
 
 
 @dataclass
+class DewatermarkCfg:
+    """源片自带搬运水印时的处理。
+
+    实测（720x1280 源、45 秒切片，含 loudnorm 音频）：off 4.67s / crop 4.47s /
+    delogo 4.56s，差异都在噪声范围内，开去水印基本不额外花时间。
+
+    - crop：顶部裁一条 + 左右各裁一点补回 9:16，再直接缩放到画布。效果最干净。
+      代价是画面放大约 crop_ratio 倍、左右各损失一点。
+    - delogo：在区域上做插值修复，画面尺寸不变。文字类水印会留下明显灰斑，
+      背景越简单越干净；只在确实不能裁画面时用。
+
+    水印位置随源而变：有的在右上（台标），有的在左上且横向拉得很长
+    （账号名 + 剧名），所以 crop_ratio 要按源调；delogo 必须给源分辨率
+    下的精确 bbox。默认 off，不影响原有流程。
+    """
+
+    mode: str = "off"             # off | crop | delogo
+    crop_ratio: float = 0.06      # crop 模式：裁掉顶部占源高的比例
+    x: int = 0                    # delogo 区域，源分辨率坐标
+    y: int = 0
+    w: int = 0
+    h: int = 0
+
+
+@dataclass
 class RenderCfg:
     width: int = 1080
     height: int = 1920
@@ -162,6 +187,7 @@ class RenderCfg:
     cpu_slots: int = 2               # 软编（x264）并发槽位
     gpu_slots: int = 2               # 硬编（VideoToolbox）并发槽位，与 CPU 槽位互不争抢
     vt_bitrate: str = "6M"           # 硬编码率，硬编只能定码率
+    dewatermark: DewatermarkCfg = field(default_factory=DewatermarkCfg)
 
 
 @dataclass

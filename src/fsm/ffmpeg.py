@@ -194,6 +194,73 @@ def _fills_canvas(src_w: int, src_h: int, width: int, height: int) -> bool:
     return width * src_h / src_w >= height
 
 
+def _dewatermark_prefix(dw, src_size: tuple[int, int] | None,
+                        src: str | Path, width: int = 1080,
+                        height: int = 1920) -> tuple[str, tuple[int, int] | None]:
+    """构建去水印前置滤镜，返回 (滤镜前缀, 处理后的有效尺寸)。
+
+    单独抽出来是因为裁切会改变源画面比例。crop 模式会把裁切框一次算准
+    （顶部一条 + 左右各裁一点补回目标宽高比），这样后续直接缩放就能铺满画布，
+    不必让 swscale 用 force_original_aspect_ratio 每帧现算比例——那条路实测
+    慢 50%（45 秒切片 7.68s vs 4.97s），而精确裁切只要 3.06s，比不去水印还快。
+    """
+    if dw is None:
+        return "", src_size
+
+    # YAML 1.1 把裸写的 off/on 解析成布尔，配置里没加引号就会拿到 False，
+    # 这里统一归一化，避免调用方被这种细节绊住。
+    mode = getattr(dw, "mode", "off")
+    if mode is False or mode is None:
+        mode = "off"
+    mode = str(mode).lower()
+    if mode == "off":
+        return "", src_size
+
+    size = src_size
+    if size is None:
+        # 没传尺寸时探一次；切片阶段本来就知道尺寸，这里只是兜底。
+        try:
+            info = probe(src)
+            size = (info.width, info.height)
+        except Exception:  # pragma: no cover - 探测失败就不去水印，别让出片中段
+            return "", src_size
+
+    if mode == "crop":
+        ratio = float(getattr(dw, "crop_ratio", 0.0) or 0.0)
+        if ratio <= 0 or size is None:
+            return "", size
+        sw, sh = size
+        top = int(sh * ratio) // 2 * 2             # yuv420p 要求偶数
+        if top <= 0 or top >= sh:
+            return "", size
+        ch = sh - top
+        # 裁掉顶部后画面变宽，再按目标宽高比裁掉左右，把比例补回 9:16
+        cw = max(2, int(ch * width / height) // 2 * 2)
+        if cw > sw:                                  # 源本来就窄，别裁到反向外扩
+            cw = sw // 2 * 2
+        if cw >= sw * 0.8:
+            cx = (sw - cw) // 2 // 2 * 2
+            return f"crop={cw}:{ch}:{cx}:{top},", (cw, ch)
+        # 侧裁会丢掉两成以上宽度（横屏源按 9:16 裁更是要砍掉大半），不值当。
+        # 此时只去掉顶部水印，剩下的交给模糊填充路径：整幅画面都在，只是上下补模糊。
+        return f"crop=iw:ih-{top}:0:{top},", (sw, ch)
+
+    if mode == "delogo":
+        w, h = int(getattr(dw, "w", 0) or 0), int(getattr(dw, "h", 0) or 0)
+        if w <= 0 or h <= 0:
+            return "", size
+        x, y = int(dw.x or 0), int(dw.y or 0)
+        # delogo 的 x/y/w/h 需落在画面内，越界会直接报错
+        if size is not None:
+            x = max(0, min(x, size[0] - 2))
+            y = max(0, min(y, size[1] - 2))
+            w = min(w, size[0] - x - 1)
+            h = min(h, size[1] - y - 1)
+        return f"delogo=x={x}:y={y}:w={w}:h={h},", size
+
+    return "", size
+
+
 def cut(
     src: str | Path, dst: str | Path, start: float, end: float,
     *, width: int, height: int, fps: int, crf: int, preset: str,
@@ -202,6 +269,7 @@ def cut(
     subs: list[dict] | None = None, threads: int = 3,
     src_size: tuple[int, int] | None = None, blur_div: int = 4,
     encoder: str = "libx264", vt_bitrate: str = "6M",
+    dewatermark=None,
 ) -> Path:
     """精确切片 + 竖屏改装（上下模糊，保留原画面完整不被裁切）。
 
@@ -220,20 +288,27 @@ def cut(
     dur = max(0.2, end - start)
     subs = subs or []
 
-    fills = bool(src_size) and _fills_canvas(src_size[0], src_size[1], width, height)
+    pre, eff_size = _dewatermark_prefix(dewatermark, src_size, src, width, height)
+    fills = bool(eff_size) and _fills_canvas(eff_size[0], eff_size[1], width, height)
     if fills:
-        # 前景即全屏：只做等比缩放 + 居中裁到画布尺寸，不建模糊层
-        vf = (
-            f"scale={width}:-2:force_original_aspect_ratio=decrease,"
-            f"crop={width}:{height}[base]"
-        )
+        if pre:
+            # 去水印前置已把画面裁成目标比例，直接缩放即可。再套一层
+            # force_original_aspect_ratio 会让 swscale 每帧重算比例，实测慢一半。
+            vf = pre + f"scale={width}:{height}[base]"
+        else:
+            # 前景即全屏：只做等比缩放 + 居中裁到画布尺寸，不建模糊层
+            vf = (
+                f"scale={width}:-2:force_original_aspect_ratio=decrease,"
+                f"crop={width}:{height}[base]"
+            )
     else:
         div = max(1, blur_div)
         bw = max(2, (width // div) // 2 * 2)
         bh = max(2, (height // div) // 2 * 2)
         bsigma = max(1.0, blur_sigma / div)
         vf = (
-            f"split=2[bg][fg];"
+            pre
+            + f"split=2[bg][fg];"
             f"[bg]scale={bw}:{bh}:force_original_aspect_ratio=increase,"
             f"crop={bw}:{bh},gblur=sigma={bsigma:.2f},"
             f"scale={width}:{height}:flags=bicubic[bgb];"

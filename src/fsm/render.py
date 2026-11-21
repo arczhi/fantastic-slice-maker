@@ -165,6 +165,7 @@ def render(
             blur_div=cfg.blur_div,
             encoder=encoder,
             vt_bitrate=cfg.vt_bitrate,
+            dewatermark=cfg.dewatermark,
         )
         log.info(f"  clip {i}: {b['role']:7s} {b['start']:.1f}-{b['end']:.1f}s "
                  f"[{encoder.replace('h264_', '')}] -> {dst.name}")
