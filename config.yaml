@@ -127,8 +127,10 @@ render:
   # crop 裁掉顶部一条再缩放，效果最干净；delogo 原地插值，画面不损失但文字水印会留灰斑。
   # 水印位置随源而变（台标常右上、账号名常在左上且横向拉很长），换源要重新量 crop_ratio。
   dewatermark:
-    mode: "off"           # off | crop | delogo（必须带引号，否则 YAML 会当布尔）
-    crop_ratio: 0.06      # crop：裁掉顶部占源高的比例
+    # 2026-11-22 实测：B 站下载的短剧源左上角烧着「姜丝剧场 bilibili」，
+    # 水印竖向占 1920 的约 90px、横向到 x≈330，属于搬运水印，带着它投稿会被判搬运。
+    mode: "crop"          # off | crop | delogo（必须带引号，否则 YAML 会当布尔）
+    crop_ratio: 0.06      # crop：裁掉顶部占源高的比例（0.06*1920=115px，留 25px 余量）
     x: 0                  # delogo 区域，源分辨率坐标
     y: 0
     w: 0
