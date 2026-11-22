@@ -79,6 +79,10 @@ planner:
   target_seconds: 52
   min_seconds: 32
   max_seconds: 95
+  # 题材策略文件：由运营数据生成（fsm-ops 的 `ops strategy --build` 产出 yaml），
+  # 给了就按里面的题材偏好改写选段要求与钩子用词；留空用内置通用规则。
+  # 也可用 `fsm run --strategy <path>` 临时指定。
+  strategy_file: ""
 
 # 出片数量。同一部剧可以出多套互不重复的方案（组合式批量出片）：
 #   --total 6      → 自动拆成 3+3 两套
@@ -129,6 +133,10 @@ render:
     y: 0
     w: 0
     h: 0
+  # 横屏源怎么装进竖屏画布。
+  # auto：上下模糊 + 原画面居中，画面完整但非满屏（默认）
+  # crop：按 9:16 居中裁切再缩放，成片满屏，代价是左右各切掉较多
+  fit: auto
 
 # 自动补字幕：源片没有内嵌字幕时（OCR 字幕覆盖率低），用 ASR 句子生成字幕烧进成片。
 # 本机 ffmpeg 是精简构建（无 libass），所以走 PIL 渲染 PNG + overlay，

@@ -27,6 +27,55 @@ SYSTEM = (
     "你只输出 JSON，不输出任何解释文字。"
 )
 
+
+def _strategy_note(cfg: PlannerCfg) -> str:
+    """把运营侧的策略文件转成提示词里的一段约束。
+
+    设计取舍：策略只影响「选哪段、怎么起钩子」，不改 JSON 结构，
+    也不改硬性时长规则。这样即使用户删了 strategy 文件，流水线行为
+    也只是退化到通用规则，不会失败。
+    """
+    sf = (cfg.strategy_file or "").strip()
+    if not sf:
+        return ""
+    try:
+        from pathlib import Path
+
+        import yaml
+
+        p = Path(sf).expanduser()
+        if not p.exists():
+            log.warning("strategy 文件不存在：%s", p)
+            return ""
+        data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    except Exception as e:                        # noqa: BLE001
+        log.warning("读取 strategy 失败（按通用规则继续）：%s", e)
+        return ""
+
+    pl = data.get("planner") or {}
+    src = data.get("source") or {}
+    genres = "、".join(f"{g.get('name')} {float(g.get('share', 0)):.0%}"
+                      for g in (src.get("top_genres") or [])[:3]
+                      if isinstance(g, dict))
+    prefer = [w for w in (pl.get("prefer_keywords") or []) if w][:24]
+    avoid = [w for w in (pl.get("avoid_keywords") or []) if w][:24]
+    rules = [r for r in (pl.get("extra_rules") or []) if r]
+    titles = [t for t in ((data.get("title") or {}).get("patterns") or []) if t][:5]
+
+    parts: list[str] = ["\n当前投放策略（来自平台榜单实测分布，优先满足）："]
+    if genres:
+        parts.append(f"- 热门题材：{genres}。选题与钩子向这些题材的结构靠拢。")
+    if rules:
+        parts.append("- 选段要求：")
+        parts.extend(f"  · {r}" for r in rules)
+    if prefer:
+        parts.append(f"- 钩子优先命中这些词（出现在台词里就优先当 hook）：{'、'.join(prefer)}")
+    if avoid:
+        parts.append(f"- 这些词不得出现在 hook、标题和字幕里：{'、'.join(avoid)}")
+    if titles:
+        parts.append(f"- 标题参考句式（可改写，不要照抄）：{' / '.join(titles)}")
+    return "\n".join(parts)
+
 TEMPLATE = """把下面这部漫剧剪成 {n_reels} 条竖屏切片，每条 {target:.0f} 秒左右（投放抖音）。
 
 候选片段（按时间顺序，时间单位秒，台词为语音转写原文）：
@@ -42,6 +91,7 @@ TEMPLATE = """把下面这部漫剧剪成 {n_reels} 条竖屏切片，每条 {ta
 5. 优先选有强冲突词、人物对峙、情绪爆发的片段；不要选空镜、纯风景、无声画面。
 6. 相邻两段台词要有承接（问答、因果、情绪递进），连起来像一段连贯剧情。
 7. in/out 必须落在候选的可剪区间内，用原始时间轴秒数。
+{strategy_note}
 
 {n_reels} 条之间不允许共用同一个 hook 段落，切入角度要不同（比如一条主打对抗、
 一条主打悬念或反转）。同一条内不要重复使用同一个候选 id。{variant_note}
@@ -354,6 +404,7 @@ def plan(
             n_reels=n_reels, target=cfg.target_seconds,
             min_s=cfg.min_seconds, max_s=cfg.max_seconds,
             candidates=_fmt_candidates(cands), variant_note=note,
+            strategy_note=_strategy_note(cfg),
         )
         # 被驳回时把原因回灌给模型再试一次。原样重发 prompt 只会让它重复
         # 同样的错误——实测三次都用同一个偏短的方案，最后白烧三次调用。

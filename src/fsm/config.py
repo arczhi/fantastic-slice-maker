@@ -143,6 +143,9 @@ class PlannerCfg:
     target_seconds: float = 52.0
     min_seconds: float = 32.0
     max_seconds: float = 95.0
+    # 题材策略文件（由外部运营数据生成，如 fsm-ops 的 strategy.yaml）。
+    # 留空则用内置的通用剪辑规则；给了就按文件里的题材偏好改写选段要求。
+    strategy_file: str = ""
 
 
 @dataclass
@@ -188,6 +191,9 @@ class RenderCfg:
     gpu_slots: int = 2               # 硬编（VideoToolbox）并发槽位，与 CPU 槽位互不争抢
     vt_bitrate: str = "6M"           # 硬编码率，硬编只能定码率
     dewatermark: DewatermarkCfg = field(default_factory=DewatermarkCfg)
+    # auto：横屏源走「上下模糊 + 原画面居中」，画面完整但非满屏（默认，老行为）
+    # crop：横屏源按 9:16 居中裁切再缩放，成片满屏，代价是左右切掉较多
+    fit: str = "auto"
 
 
 @dataclass

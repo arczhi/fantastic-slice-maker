@@ -269,7 +269,7 @@ def cut(
     subs: list[dict] | None = None, threads: int = 3,
     src_size: tuple[int, int] | None = None, blur_div: int = 4,
     encoder: str = "libx264", vt_bitrate: str = "6M",
-    dewatermark=None,
+    dewatermark=None, fit: str = "auto",
 ) -> Path:
     """精确切片 + 竖屏改装（上下模糊，保留原画面完整不被裁切）。
 
@@ -292,15 +292,30 @@ def cut(
     fills = bool(eff_size) and _fills_canvas(eff_size[0], eff_size[1], width, height)
     if fills:
         if pre:
-            # 去水印前置已把画面裁成目标比例，直接缩放即可。再套一层
-            # force_original_aspect_ratio 会让 swscale 每帧重算比例，实测慢一半。
-            vf = pre + f"scale={width}:{height}[base]"
+            # 前置裁切一般已把画面裁成目标比例，这时直接缩放最准也最快。
+            # 但源比目标更窄时（如 864x1920 这种超长竖屏）侧裁补不回 9:16，
+            # 直接 scale=w:h 会把画面横向拉宽，所以退回「按宽缩放 + 居中裁」。
+            ew, eh = eff_size
+            if abs(ew / eh - width / height) < 0.01:
+                vf = pre + f"scale={width}:{height}[base]"
+            else:
+                vf = pre + f"scale={width}:-2,crop={width}:{height}[base]"
         else:
             # 前景即全屏：只做等比缩放 + 居中裁到画布尺寸，不建模糊层
             vf = (
                 f"scale={width}:-2:force_original_aspect_ratio=decrease,"
                 f"crop={width}:{height}[base]"
             )
+    elif str(fit).lower() == "crop" and eff_size:
+        # 横屏源铺满竖屏画布：按目标比例居中裁，再缩放到画布。
+        # 先裁后缩比「放大填满再裁」少搬运大量像素，实测快一个档。
+        ew, eh = eff_size
+        ch = eh // 2 * 2
+        cw = max(2, int(ch * width / height) // 2 * 2)   # yuv420p 要偶数
+        if cw > ew:                                      # 源比目标还窄，退化为不裁
+            cw = ew // 2 * 2
+        cx = (ew - cw) // 2 // 2 * 2
+        vf = pre + f"crop={cw}:{ch}:{cx}:0,scale={width}:{height}[base]"
     else:
         div = max(1, blur_div)
         bw = max(2, (width // div) // 2 * 2)

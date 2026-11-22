@@ -48,6 +48,16 @@ def _build_parser() -> argparse.ArgumentParser:
             "--crop-ratio", type=float, default=None,
             help="crop 模式裁掉的顶部比例，默认取 config（0.06）",
         )
+        sp.add_argument(
+            "--fit", choices=["auto", "crop"], default=None,
+            help="横屏源怎么装进竖屏：auto=上下模糊（默认），"
+                 "crop=按 9:16 居中裁切成满屏（代价是左右切掉较多）",
+        )
+        sp.add_argument(
+            "--strategy", default=None,
+            help="题材策略文件（yaml）。由运营数据生成，给出后按题材偏好改写选段要求，"
+                 "例如 fsm-ops 的 config/strategy.yaml",
+        )
         sp.add_argument("--max-load", type=float, default=None,
                         help="单核负载上限，超过就暂停派活（默认取 config resource）")
         sp.add_argument("--min-free-mem", type=float, default=None,
@@ -96,6 +106,10 @@ def _cfg(args) -> cfg_mod.Config:
         overrides.setdefault("render", {}).setdefault("dewatermark", {})["mode"] = args.dewatermark
     if getattr(args, "crop_ratio", None) is not None:
         overrides.setdefault("render", {}).setdefault("dewatermark", {})["crop_ratio"] = args.crop_ratio
+    if getattr(args, "fit", None):
+        overrides.setdefault("render", {})["fit"] = args.fit
+    if getattr(args, "strategy", None):
+        overrides.setdefault("planner", {})["strategy_file"] = args.strategy
     return cfg_mod.load(getattr(args, "config", None), overrides)
 
 
