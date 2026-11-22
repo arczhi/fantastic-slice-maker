@@ -270,6 +270,8 @@ def cut(
     src_size: tuple[int, int] | None = None, blur_div: int = 4,
     encoder: str = "libx264", vt_bitrate: str = "6M",
     dewatermark=None, fit: str = "auto",
+    inset: float = 1.0, pad_color: str = "0x14161C",
+    audio_gain_db: float = 0.0,
 ) -> Path:
     """精确切片 + 竖屏改装（上下模糊，保留原画面完整不被裁切）。
 
@@ -331,6 +333,12 @@ def cut(
             f"[bgb][fgs]overlay=(W-w)/2:(H-h)/2[base]"
         )
     cur = "base"
+    # 引用片段要内缩：整屏原片 = 拆条，内缩 + 深色底 = 明确是「引用」。
+    # 放在 subs 之前，字幕条仍按画布坐标叠加（块位置不变）。
+    if inset and float(inset) < 0.999:
+        vf += (f";[{cur}]scale=iw*{float(inset):.4f}:-2:flags=bicubic,"
+               f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color={pad_color}[ins]")
+        cur = "ins"
     for i, s in enumerate(subs):
         nxt = f"sub{i}"
         vf += (
@@ -347,8 +355,11 @@ def cut(
     for s in subs:
         cmd += ["-i", str(s["png"])]
     if has_audio:
+        # audio_gain_db 在 loudnorm 之后施加：loudnorm 会把音量拉回统一响度，
+        # 先压低再归一等于没压。引用片段靠这个把原声退到背景。
+        again = f",volume={float(audio_gain_db):.1f}dB" if audio_gain_db else ""
         cmd += [
-            "-filter_complex", f"[0:v]{vf};[0:a]aresample=async=1,loudnorm=I={loudness_i}:TP=-1.5:LRA=11[a]",
+            "-filter_complex", f"[0:v]{vf};[0:a]aresample=async=1,loudnorm=I={loudness_i}:TP=-1.5:LRA=11{again}[a]",
             "-map", "[v]", "-map", "[a]",
             "-c:a", "aac", "-b:a", audio_bitrate, "-ar", "48000", "-ac", "2",
         ]
@@ -379,7 +390,15 @@ def cut(
     return dst
 
 
-def concat(clips: list[Path], dst: str | Path, timeout: int = 900) -> Path:
+def concat(clips: list[Path], dst: str | Path, timeout: int = 900, *,
+           reencode: bool = False, crf: int = 20, preset: str = "veryfast",
+           width: int = 0, height: int = 0, fps: int = 0, threads: int = 3) -> Path:
+    """拼接。
+
+    reencode=True 是给解说模式用的：文字卡段与引用段来源不同，编码参数
+    绝不会完全一致，`-c copy` 拼接会报 Non-monotonous DTS 或音画错位。
+    一次性重编码（60-90 秒的片子约 5-8 秒）比事后排查 DTS 便宜。
+    """
     dst = Path(dst)
     dst.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as f:
@@ -387,13 +406,96 @@ def concat(clips: list[Path], dst: str | Path, timeout: int = 900) -> Path:
             f.write(f"file '{Path(c).resolve()}'\n")
         list_path = f.name
     try:
-        run([
-            "ffmpeg", "-v", "error", "-y", "-f", "concat", "-safe", "0",
-            "-i", list_path, "-c", "copy", "-movflags", "+faststart", str(dst),
-        ], timeout=timeout)
+        if not reencode:
+            run([
+                "ffmpeg", "-v", "error", "-y", "-f", "concat", "-safe", "0",
+                "-i", list_path, "-c", "copy", "-movflags", "+faststart", str(dst),
+            ], timeout=timeout)
+            return dst
+        cmd = ["ffmpeg", "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", list_path]
+        if width and height:
+            cmd += ["-vf", (
+                f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1"
+                + (f",fps={fps}" if fps else "")
+            )]
+        cmd += ["-c:v", "libx264", "-preset", preset, "-crf", str(crf),
+                "-threads", str(max(1, threads)),
+                "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
+                "-movflags", "+faststart", str(dst)]
+        run(cmd, timeout=timeout)
+        return dst
     finally:
         Path(list_path).unlink(missing_ok=True)
+
+
+def still_segment(
+    png: str | Path, dst: str | Path, dur: float, *,
+    width: int, height: int, fps: int, crf: int = 20, preset: str = "veryfast",
+    threads: int = 3, encoder: str = "libx264", vt_bitrate: str = "6M",
+    audio: str | Path | None = None, fade: float = 0.2,
+) -> Path:
+    """静帧（文字卡）+ 配音 → 一个标准段。
+
+    解说模式的「原创新画面」就是这么来的：没有真人出镜，就用设计的文字卡
+    承载口播。它同时也是对平台的一个信号——画面主体不是原片。
+    静帧必须自己带淡入淡出，硬切在两种画面之间会显得像卡了。
+    """
+    dst = Path(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dur = max(0.6, float(dur))
+
+    vf = (f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+          f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p")
+    if fade > 0:
+        vf += f",fade=t=in:st=0:d={fade:.2f}"
+        if dur > fade * 2.5:
+            vf += f",fade=t=out:st={dur - fade:.2f}:d={fade:.2f}"
+
+    has_voice = bool(audio) and Path(str(audio)).exists()
+    cmd = ["ffmpeg", "-v", "error", "-y",
+           "-loop", "1", "-framerate", str(fps), "-t", f"{dur:.3f}", "-i", str(png)]
+    if has_voice:
+        cmd += ["-i", str(audio)]
+        cmd += ["-filter_complex",
+                f"[0:v]{vf}[v];"
+                f"[1:a]aresample=48000,apad,atrim=0:{dur:.3f},asetpts=N/SR/TB[a]",
+                "-map", "[v]", "-map", "[a]"]
+    else:
+        cmd += ["-f", "lavfi", "-t", f"{dur:.3f}",
+                "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"]
+        cmd += ["-filter_complex", f"[0:v]{vf}[v]",
+                "-map", "[v]", "-map", "[1:a]"]
+    cmd += ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
+    if encoder == "h264_videotoolbox" and has_encoder("h264_videotoolbox"):
+        cmd += ["-c:v", "h264_videotoolbox", "-b:v", vt_bitrate,
+                "-maxrate", vt_bitrate, "-bufsize", "12M"]
+    else:
+        cmd += ["-c:v", "libx264", "-preset", preset, "-crf", str(crf),
+                "-threads", str(max(1, threads))]
+    cmd += ["-r", str(fps), "-pix_fmt", "yuv420p", "-shortest",
+            "-movflags", "+faststart", str(dst)]
+    run(cmd, timeout=600)
+    if probe(dst).duration < 0.2:
+        raise FFmpegError(f"produced empty still segment: {dst}")
     return dst
+
+
+def duration_of(path: str | Path, timeout: int = 60) -> float:
+    """只读容器时长，不要求有视频流。
+
+    probe() 拿不到 v:0 会直接抛错（它服务于成片），而配音是纯音频 wav，
+    用 probe 判时长必然失败——之前就因此把 TTS 时长静默降级成「按字数估」，
+    估出来的时长和真实语速对不上，字幕卡会提前切断。
+    """
+    p = subprocess.run([
+        "ffprobe", "-v", "error", "-show_entries", "format=duration",
+        "-of", "default=nw=1:nk=1", str(path),
+    ], capture_output=True, timeout=timeout)
+    try:
+        return float(p.stdout.decode("utf-8", "replace").strip())
+    except ValueError:
+        return 0.0
 
 
 def detect_black(src: str | Path, timeout: int = 300) -> list[tuple[float, float]]:

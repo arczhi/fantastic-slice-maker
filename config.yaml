@@ -153,3 +153,29 @@ subtitle:
   bottom_pct: 0.06
   stroke: 3
   min_cue: 0.55
+
+# 解说模式：原片只当「引用片段」，成片主体是原创口播 + 文字卡。
+# 为什么单开一个模式而不是给切片加配音：抖音驳回的原文是「以片段拼接/拆条
+# 形式呈现」，判据是「连续原片画面 + 原声 + 原硬字幕」这个组合，跟水印无关；
+# B 站判的是网络剧片资质。平台自己给的出路只有「口播解说、剧情观点梳理」
+# 这类原创表达，所以必须把画面主体和音轨都换掉。
+#   fsm run x.mp4 --mode commentary
+commentary:
+  enabled: false            # 用 --mode commentary 打开；改成 true 就是默认模式
+  quote_max: 5.0            # 单条引用最长秒数（版权判定里最硬的一个数）
+  quote_min: 2.2
+  quote_ratio_max: 0.30     # 引用总时长 / 成片时长上限，超了自动压短
+  quote_audio_gain_db: -18.0  # 引用段原声压低，主体必须是解说音轨
+  quote_inset: 0.78         # 引用画面占画布宽度比例：内缩 + 深色底 = 明确是引用
+  pad_color: "0x14161C"
+  tts: true                 # 用 macOS say 合成配音；改真人出镜就关掉
+  voice: Tingting           # say -v '?' 里 zh_CN 的语音
+  rate: 190
+  lead_pad: 0.35            # 每段口播尾部留白，避免两段粘连
+  card_bg: "#2A3342"        # 必须亮于 10% 亮度，纯黑卡会被 QC 判黑场
+  card_accent: "#E0A458"
+  card_footer: "剧情评述 · 片段引用"
+  talk_min_chars: 40
+  talk_max_chars: 85
+  llm: true                 # 口播词用 DeepSeek；关掉是规则兜底（必须人工重写）
+  bgm: false                # 解说本身有节奏，默认不再铺 BGM

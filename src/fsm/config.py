@@ -210,6 +210,48 @@ class SubtitleCfg:
 
 
 @dataclass
+class CommentaryCfg:
+    """解说模式：原片只做「引用片段」，成片主体是自己的口播与原创新画面。
+
+    为什么要有这个模式：抖音把「原片连续画面 + 原声 + 原硬字幕」判为
+    「片段拼接/拆条」，B 站判为「网络剧片」。这两条都不是水印问题，
+    后期处理改不了。唯一能过的形态是平台自己写的「口播解说 / 观点梳理」：
+    原创音轨占主体、原片只作短暂引用。
+    """
+    enabled: bool = False            # 默认仍是整段切片，避免影响现有链路
+    # 单条引用的最长秒数。这是版权判定里最硬的一个数——引用越短越安全，
+    # 但也越容易看不懂，5 秒是「能交代一句台词」与「不构成拆条」的交点。
+    quote_max: float = 5.0
+    quote_min: float = 2.2
+    max_quotes: int = 4              # 引用条数上限：再多就成流水账，占比也压不住
+    # 引用总时长 / 成片时长上限，超过就继续压短引用
+    quote_ratio_max: float = 0.30
+    # 成片目标时长。抖音 60-90 秒的完播率明显好于 2 分钟
+    target_seconds: float = 88.0
+    # 引用片段的原声压低多少 dB。保留一点环境声能看出是原片，
+    # 但主体必须是解说音轨，否则等于没改形态。
+    quote_audio_gain_db: float = -18.0
+    # 引用画面占画布宽度的比例。内缩 + 深色底 = 视觉上就在说「这是引用」，
+    # 顺手也让它没法被当成一条独立成片直接发出去。
+    quote_inset: float = 0.78
+    pad_color: str = "0x14161C"
+    # 配音
+    tts: bool = True
+    voice: str = "Tingting"          # macOS say 的中文语音，没有则退化为静音
+    rate: int = 190                  # say 语速（词/分）
+    lead_pad: float = 0.35           # 每段口播尾留白，避免两段粘连
+    # 文字卡
+    card_bg: str = "#2A3342"         # 必须亮于 10% 亮度，否则 QC 判黑场
+    card_accent: str = "#E0A458"
+    card_footer: str = "剧情评述 · 片段引用"
+    # 口播词长度约束（字）。35-70 字约等于 9-17 秒，五段正好压在 90 秒内
+    talk_min_chars: int = 35
+    talk_max_chars: int = 70
+    llm: bool = True
+    bgm: bool = False
+
+
+@dataclass
 class ResourceCfg:
     """跑批的资源上限。默认值按「10 核 / 32GB 上跑得舒服」标定。"""
     max_workers: int = 0             # 0 = 按核数与内存自动推算
@@ -249,6 +291,7 @@ class Config:
     render: RenderCfg = field(default_factory=RenderCfg)
     bgm: BGMCfg = field(default_factory=BGMCfg)
     subtitle: SubtitleCfg = field(default_factory=SubtitleCfg)
+    commentary: CommentaryCfg = field(default_factory=CommentaryCfg)
     output: OutputCfg = field(default_factory=OutputCfg)
     resource: ResourceCfg = field(default_factory=ResourceCfg)
     paths: PathsCfg = field(default_factory=PathsCfg)

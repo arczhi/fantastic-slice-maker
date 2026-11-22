@@ -12,7 +12,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from . import bgm, digest, ffmpeg, planner, qc, recall, render, subtitle, timeline
+from . import bgm, commentary, digest, ffmpeg, planner, qc, recall, render, subtitle, timeline
 from .config import Config
 from .signals import asr as asr_sig
 from .signals import ocr as ocr_sig
@@ -72,10 +72,14 @@ def process(
     video: str | Path, cfg: Config, n_reels: int | None = None, force: bool = False,
     rerender: bool = False, sub_mode: str | None = None,
     variants: int | None = None, total: int | None = None,
+    mode: str | None = None,
 ) -> dict:
     video = Path(video)
     if not video.exists():
         return {"ok": False, "video": str(video), "error": "file not found"}
+
+    mode = (mode or ("commentary" if cfg.commentary.enabled else "clip")).lower()
+    commentary_mode = mode == "commentary"
 
     vid = video_id_of(video)
     work = ensure_dir(Path(cfg.paths.work) / vid)
@@ -188,13 +192,18 @@ def process(
     # 「这条有字幕、那条没有」。覆盖率比条数可靠——无字幕片里 OCR 仍会
     # 零星抓到台标、集数标题和画面招牌。
     sub_dec = subtitle.decide(strips, info.duration, cfg.subtitle, sub_mode)
+    if commentary_mode:
+        # 解说模式的口播压在文字卡上，再给引用段补原片字幕只会打架
+        sub_dec = {"needed": False, "coverage": sub_dec.get("coverage", 0.0),
+                   "reason": "解说模式：文字卡承载口播"}
     if sub_dec["needed"] and not sentences:
         log.warning(f"[{vid}] 需要补字幕但没有 ASR 句子，跳过")
         sub_dec["needed"] = False
     if sub_dec["needed"]:
         log.info(f"[{vid}] 自动补字幕：{sub_dec['reason']}，可用 ASR {len(sentences)} 句")
 
-    tracks = bgm.load_index(cfg.bgm) if cfg.bgm.enabled else []
+    tracks = (bgm.load_index(cfg.bgm)
+              if (cfg.bgm.enabled and (not commentary_mode or cfg.commentary.bgm)) else [])
     flat_reels = [r for _, _, r in reels_flat]
     picks = bgm.choose(tracks, flat_reels, cfg.planner, cfg.bgm) if tracks else []
     if tracks:
@@ -203,6 +212,61 @@ def process(
         log.warning(f"[{vid}] 没有可用 BGM，输出无配乐版本")
 
     for k, (v, i, reel) in enumerate(reels_flat, start=1):
+        # 解说模式走完全不同的产出形态：口播卡 + 短引用，音轨重做。
+        # 不共用下面的 BGM/补字幕/拼接逻辑，因为那套都是「一条原片」的假设。
+        if commentary_mode:
+            try:
+                with book.run(f"commentary_{v}_{i}"):
+                    cres = commentary.build(
+                        src=str(video), reel=reel,
+                        work=work / f"v{v:02d}" / f"reel{i:02d}",
+                        out_dir=out_dir, cfg=cfg, info=info, sentences=sentences,
+                        shots=tl.get("shots") or [], vis=vis, strips=strips,
+                        tag=f"v{v:02d}-{i:02d}", variant=v, index=i,
+                    )
+            except Exception as e:                   # noqa: BLE001
+                log.warning(f"[{vid}] commentary v{v}-{i} failed: {e}")
+                results.append({"index": i, "variant": v, "ok": False,
+                                "error": f"commentary: {e}"[:300]})
+                continue
+
+            cover = out_dir / f"{cres['stem']}.jpg"
+            try:
+                ffmpeg.run(["ffmpeg", "-v", "error", "-y", "-ss", "2",
+                            "-i", cres["path"], "-frames:v", "1",
+                            "-vf", "scale=540:-2", str(cover)], timeout=120)
+            except ffmpeg.FFmpegError:
+                cover = None
+            try:
+                quality = qc.check(cres["path"], cfg.render, expect_audio=True)
+            except Exception as e:                   # noqa: BLE001
+                quality = {"ok": False, "issues": [f"qc crashed: {e}"]}
+
+            produced |= set(cres["files"])
+            produced.add(Path(cres["path"]).name)
+            if cover:
+                produced.add(cover.name)
+            results.append({
+                "index": i, "variant": v, "ok": True, "mode": "commentary",
+                "title": cres["title"], "hook": reel.get("hook", ""),
+                "reason": reel.get("reason", ""),
+                "path": cres["path"], "cover": str(cover) if cover else None,
+                "duration": cres["duration"],
+                "quote_ratio": cres["quote_ratio"],
+                "quote_total": cres["quote_total"],
+                "degraded": cres["degraded"],
+                "script": cres["script"], "md": cres["md"],
+                "beats": [
+                    {"role": s.get("role") or s.get("kind", ""),
+                     "src_start": s.get("start") or 0.0,
+                     "src_end": s.get("end") or 0.0,
+                     "dur": s["dur"], "text": (s.get("text") or "")[:60]}
+                    for s in cres["segments"]
+                ],
+                "qc": quality,
+            })
+            continue
+
         beats = render.snap_to_shots(reel["beats"], tl.get("shots") or [])
         beats = render.trim_blank(beats, vis)
         if len(beats) < 2:
@@ -340,6 +404,7 @@ def process(
         "resolution": f"{info.width}x{info.height}",
         "has_audio": info.has_audio,
         "warnings": warnings,
+        "mode": mode,
         "strategy": plans[0].get("strategy") if plans else None,
         "plan_error": next((p.get("error") for p in plans if p.get("error")), None),
         "variants": len(counts),
@@ -515,6 +580,13 @@ def _write_markdown(report: dict, path: Path) -> None:
                 f"- 钩子：{r['hook']}",
                 f"- 编排：{r['reason']}",
             ]
+            if r.get("mode") == "commentary":
+                lines.append(f"- 引用占比：{r.get('quote_ratio', 0):.0%}"
+                             f"（{r.get('quote_total', 0)}s），口播为主体")
+                if r.get("degraded"):
+                    lines.append("- **口播词是规则兜底版，发布前必须人工重写**")
+                if r.get("md"):
+                    lines.append(f"- 解说脚本：`{Path(r['md']).name}`")
             b = r.get("bgm") or {}
             if b.get("title"):
                 al = r.get("beat_align") or {}

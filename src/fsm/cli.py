@@ -35,6 +35,18 @@ def _build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--no-llm", action="store_true", help="跳过 DeepSeek，用规则兜底")
         sp.add_argument("--no-bgm", action="store_true", help="不混入背景音乐")
         sp.add_argument(
+            "--mode", choices=["clip", "commentary"], default=None,
+            help="clip=整段原片切片（默认）；commentary=解说形态：原创文字卡口播 + "
+                 "≤5 秒引用片段，音轨重做。抖音判「拆条」、B 站判「网络剧片」的素材"
+                 "只有后者可能过审",
+        )
+        sp.add_argument("--no-tts", action="store_true",
+                        help="解说模式不合成配音，只出口播脚本与引用片段")
+        sp.add_argument("--quote-max", type=float, default=None,
+                        help="解说模式单条引用最长秒数（默认 5）")
+        sp.add_argument("--quote-ratio", type=float, default=None,
+                        help="解说模式引用总时长占成片比例上限（默认 0.30）")
+        sp.add_argument(
             "--subtitle", choices=["auto", "on", "off"], default="auto",
             help="自动补字幕：auto=源片无字幕时才补（默认），on=强制补，off=不补",
         )
@@ -110,6 +122,14 @@ def _cfg(args) -> cfg_mod.Config:
         overrides.setdefault("render", {})["fit"] = args.fit
     if getattr(args, "strategy", None):
         overrides.setdefault("planner", {})["strategy_file"] = args.strategy
+    if getattr(args, "mode", None):
+        overrides.setdefault("commentary", {})["enabled"] = (args.mode == "commentary")
+    if getattr(args, "no_tts", False):
+        overrides.setdefault("commentary", {})["tts"] = False
+    if getattr(args, "quote_max", None) is not None:
+        overrides.setdefault("commentary", {})["quote_max"] = args.quote_max
+    if getattr(args, "quote_ratio", None) is not None:
+        overrides.setdefault("commentary", {})["quote_ratio_max"] = args.quote_ratio
     return cfg_mod.load(getattr(args, "config", None), overrides)
 
 
@@ -126,7 +146,7 @@ def cmd_run(args) -> int:
     try:
         rep = process(args.video, cfg, n_reels=args.reels, force=args.force,
                       rerender=args.rerender, sub_mode=args.subtitle,
-                      variants=args.variants, total=args.total)
+                      variants=args.variants, total=args.total, mode=args.mode)
     finally:
         _stop_asr(cfg)
     print(json.dumps({
