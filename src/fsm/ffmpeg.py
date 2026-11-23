@@ -246,17 +246,31 @@ def _dewatermark_prefix(dw, src_size: tuple[int, int] | None,
         return f"crop=iw:ih-{top}:0:{top},", (sw, ch)
 
     if mode == "delogo":
-        w, h = int(getattr(dw, "w", 0) or 0), int(getattr(dw, "h", 0) or 0)
-        if w <= 0 or h <= 0:
+        # 多框优先：拼接合集源每段台标位置不同，用 boxes 一次链式修掉。
+        raw = list(getattr(dw, "boxes", None) or [])
+        if not raw and (getattr(dw, "w", 0) or 0) > 0:
+            raw = [[getattr(dw, "x", 0), getattr(dw, "y", 0),
+                    getattr(dw, "w", 0), getattr(dw, "h", 0)]]
+        if not raw:
             return "", size
-        x, y = int(dw.x or 0), int(dw.y or 0)
-        # delogo 的 x/y/w/h 需落在画面内，越界会直接报错
-        if size is not None:
-            x = max(0, min(x, size[0] - 2))
-            y = max(0, min(y, size[1] - 2))
-            w = min(w, size[0] - x - 1)
-            h = min(h, size[1] - y - 1)
-        return f"delogo=x={x}:y={y}:w={w}:h={h},", size
+        parts = []
+        for b in raw:
+            if len(b) != 4:
+                continue
+            bw, bh = int(b[2] or 0), int(b[3] or 0)
+            bx, by = int(b[0] or 0), int(b[1] or 0)
+            if bw <= 0 or bh <= 0:
+                continue
+            # delogo 的 x/y/w/h 需落在画面内，越界会直接报错
+            if size is not None:
+                bx = max(1, min(bx, size[0] - 2))
+                by = max(1, min(by, size[1] - 2))
+                bw = min(bw, size[0] - bx - 1)
+                bh = min(bh, size[1] - by - 1)
+            parts.append(f"delogo=x={bx}:y={by}:w={bw}:h={bh}")
+        if not parts:
+            return "", size
+        return ",".join(parts) + ",", size
 
     return "", size
 
@@ -273,6 +287,7 @@ def cut(
     inset: float = 1.0, pad_color: str = "0x14161C",
     audio_gain_db: float = 0.0,
     extra_audio: str | Path | None = None, extra_delay: float = 0.0,
+    narr_gain_db: float = 0.0,
 ) -> Path:
     """精确切片 + 竖屏改装（上下模糊，保留原画面完整不被裁切）。
 
@@ -289,6 +304,10 @@ def cut(
     extra_audio：解说/旁白音轨（如 TTS wav），叠在原声上；原声先压
     audio_gain_db，两轨混完再统一 loudnorm。extra_delay 是解说起始的秒数
     （adelay），波形比段短时用 apad 补齐到段长，不会拖尾。
+
+    narr_gain_db：解说轨自己的增益（pre-mix）。mix 的相对音量比在 amix
+    时就定了，loudnorm 只对整体做统一增益，不改变相对比，所以口播想要
+    更突出就在这里加，而不是动 audio_gain_db（那是压原声）。
     """
     dst = Path(dst)
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -368,7 +387,7 @@ def cut(
         # TTS wav 常是单声道/低采样率，先统一到立体声 48k 再 adelay；
         # apad=whole_dur 把解说轨补齐到段长，amix 不会因为轨短而提前结束。
         delay_ms = int(max(0.0, float(extra_delay)) * 1000)
-        bg_gain = f",volume={float(audio_gain_db):.1f}dB" if audio_gain_db else ""
+        ng = f",volume={float(narr_gain_db):.1f}dB" if narr_gain_db else ""
         vf_audio = (
             f"[0:a]aresample=async=1,volume={float(audio_gain_db):.1f}dB" if audio_gain_db
             else f"[0:a]aresample=async=1"
@@ -379,7 +398,7 @@ def cut(
             f"{vf_audio}[bg];"
             f"[{narr_idx}:a]aresample=48000,"
             f"aformat=sample_fmts=fltp:channel_layouts=stereo,"
-            f"adelay={delay_ms}|{delay_ms},apad=whole_dur={dur:.3f}[narr];"
+            f"adelay={delay_ms}|{delay_ms},apad=whole_dur={dur:.3f}{ng}[narr];"
             f"[narr][bg]amix=inputs=2:duration=longest:normalize=0,"
             f"loudnorm=I={loudness_i}:TP=-1.5:LRA=11[a]",
             "-map", "[v]", "-map", "[a]",

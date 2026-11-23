@@ -171,6 +171,9 @@ class DewatermarkCfg:
     y: int = 0
     w: int = 0
     h: int = 0
+    # 多水印源（拼接合集每段台标位置不同）用 boxes 给多个 delogo 框，
+    # 每项 [x, y, w, h]（源分辨率坐标）。给了 boxes 就忽略单个 x/y/w/h。
+    boxes: list = field(default_factory=list)
 
 
 @dataclass
@@ -231,6 +234,13 @@ class CommentaryCfg:
     # 引用片段的原声压低多少 dB。保留一点环境声能看出是原片，
     # 但主体必须是解说音轨，否则等于没改形态。
     quote_audio_gain_db: float = -18.0
+    # overlay 模式专用音量（与 commentary 模式的 quote_audio_gain_db 分开调）：
+    #   narr_gain_db          口播 TTS 轨增益，正值更突出（用户要求口播大声）
+    #   overlay_bg_gain_db    口播段里原声的压低量（pre-mix，决定与口播的比例）
+    #   overlay_quote_gain_db 引用段原声压低量（post-loudnorm，直接生效）
+    narr_gain_db: float = 4.0
+    overlay_bg_gain_db: float = -24.0
+    overlay_quote_gain_db: float = -6.0
     # 引用画面占画布宽度的比例。内缩 + 深色底 = 视觉上就在说「这是引用」，
     # 顺手也让它没法被当成一条独立成片直接发出去。
     quote_inset: float = 0.78

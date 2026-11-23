@@ -325,7 +325,8 @@ def build_overlay(
             vt_bitrate=cfg.render.vt_bitrate, dewatermark=cfg.render.dewatermark,
             fit=cfg.render.fit,
             inset=1.0,                                   # 全幅，无内缩边
-            audio_gain_db=ccfg.quote_audio_gain_db,      # 原声退到背景
+            audio_gain_db=ccfg.overlay_bg_gain_db,       # 原声退到背景
+            narr_gain_db=ccfg.narr_gain_db,              # 口播增益（用户要求口播更突出）
             subs=subs,
             extra_audio=(wav if wav.exists() else None),  # TTS 压在原声上
         )
@@ -352,7 +353,9 @@ def build_overlay(
                 vt_bitrate=cfg.render.vt_bitrate, dewatermark=cfg.render.dewatermark,
                 fit=cfg.render.fit,
                 inset=1.0,                               # 全幅，两段解说之间的原声呼吸口
-                audio_gain_db=0.0,
+                # 引用段没有 extra_audio，走 loudnorm 之后的 gain 分支，压低有效；
+                # pre-loudnorm 压会被归一化拉回来等于没压。
+                audio_gain_db=ccfg.overlay_quote_gain_db,
             )
             segments.append(qpath)
             qdur = ffmpeg.probe(qpath).duration
