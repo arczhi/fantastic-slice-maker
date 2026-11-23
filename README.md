@@ -24,6 +24,15 @@
  └─ FFmpeg 执行      切片 → 竖屏 → 响度归一 → 节拍对齐 → 混音 → 拼接 → 质检
 ```
 
+## 模式
+
+- `--mode clip`：整段原片切片（原声 + 原硬字幕）。
+- `--mode commentary`：解说形态——原创文字卡口播 + ≤5 秒引用片段，音轨重做。
+- `--mode overlay`：解说字幕叠原片——画面全程原片（配 `render.dewatermark` 去水印），
+  口播 TTS 压在压低的原声上，解说字幕按口播时长切成字幕条叠加在原画面底边，
+  没有独立的文字卡画面。拼接合集的多处台标用 `render.dewatermark.boxes` 多框 delogo。
+
+
 ## 快速开始
 
 前置：`ffmpeg` / `ffprobe` 在 PATH 里，Python 3.11+。
