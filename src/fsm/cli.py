@@ -35,10 +35,10 @@ def _build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--no-llm", action="store_true", help="跳过 DeepSeek，用规则兜底")
         sp.add_argument("--no-bgm", action="store_true", help="不混入背景音乐")
         sp.add_argument(
-            "--mode", choices=["clip", "commentary"], default=None,
+            "--mode", choices=["clip", "commentary", "overlay"], default=None,
             help="clip=整段原片切片（默认）；commentary=解说形态：原创文字卡口播 + "
-                 "≤5 秒引用片段，音轨重做。抖音判「拆条」、B 站判「网络剧片」的素材"
-                 "只有后者可能过审",
+                 "≤5 秒引用片段，音轨重做；overlay=解说字幕叠原片：画面全程原片，"
+                 "口播 TTS 压在压低的原声上，解说字幕叠加在原画面上",
         )
         sp.add_argument("--no-tts", action="store_true",
                         help="解说模式不合成配音，只出口播脚本与引用片段")
@@ -123,7 +123,8 @@ def _cfg(args) -> cfg_mod.Config:
     if getattr(args, "strategy", None):
         overrides.setdefault("planner", {})["strategy_file"] = args.strategy
     if getattr(args, "mode", None):
-        overrides.setdefault("commentary", {})["enabled"] = (args.mode == "commentary")
+        overrides.setdefault("commentary", {})["enabled"] = (
+            args.mode in ("commentary", "overlay"))
     if getattr(args, "no_tts", False):
         overrides.setdefault("commentary", {})["tts"] = False
     if getattr(args, "quote_max", None) is not None:

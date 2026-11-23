@@ -272,6 +272,7 @@ def cut(
     dewatermark=None, fit: str = "auto",
     inset: float = 1.0, pad_color: str = "0x14161C",
     audio_gain_db: float = 0.0,
+    extra_audio: str | Path | None = None, extra_delay: float = 0.0,
 ) -> Path:
     """精确切片 + 竖屏改装（上下模糊，保留原画面完整不被裁切）。
 
@@ -284,6 +285,10 @@ def cut(
 
     subs 是自动补的字幕条 [{png, start, end, y}]，start/end 为**段内相对时间**。
     用 overlay + enable 叠加静态 PNG，和切片同一次编码完成，不额外损失画质。
+
+    extra_audio：解说/旁白音轨（如 TTS wav），叠在原声上；原声先压
+    audio_gain_db，两轨混完再统一 loudnorm。extra_delay 是解说起始的秒数
+    （adelay），波形比段短时用 apad 补齐到段长，不会拖尾。
     """
     dst = Path(dst)
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -354,7 +359,33 @@ def cut(
     ]
     for s in subs:
         cmd += ["-i", str(s["png"])]
-    if has_audio:
+    if extra_audio is not None:
+        cmd += ["-i", str(extra_audio)]
+    narr_idx = 1 + len(subs)
+    if has_audio and extra_audio is not None:
+        # 解说叠加模式：原声退到背景（先压后混，顺序不能反——loudnorm 会把
+        # 压低的音量拉回来，等于没压），混完统一归一响度。
+        # TTS wav 常是单声道/低采样率，先统一到立体声 48k 再 adelay；
+        # apad=whole_dur 把解说轨补齐到段长，amix 不会因为轨短而提前结束。
+        delay_ms = int(max(0.0, float(extra_delay)) * 1000)
+        bg_gain = f",volume={float(audio_gain_db):.1f}dB" if audio_gain_db else ""
+        vf_audio = (
+            f"[0:a]aresample=async=1,volume={float(audio_gain_db):.1f}dB" if audio_gain_db
+            else f"[0:a]aresample=async=1"
+        )
+        cmd += [
+            "-filter_complex",
+            f"[0:v]{vf};"
+            f"{vf_audio}[bg];"
+            f"[{narr_idx}:a]aresample=48000,"
+            f"aformat=sample_fmts=fltp:channel_layouts=stereo,"
+            f"adelay={delay_ms}|{delay_ms},apad=whole_dur={dur:.3f}[narr];"
+            f"[narr][bg]amix=inputs=2:duration=longest:normalize=0,"
+            f"loudnorm=I={loudness_i}:TP=-1.5:LRA=11[a]",
+            "-map", "[v]", "-map", "[a]",
+            "-c:a", "aac", "-b:a", audio_bitrate, "-ar", "48000", "-ac", "2",
+        ]
+    elif has_audio:
         # audio_gain_db 在 loudnorm 之后施加：loudnorm 会把音量拉回统一响度，
         # 先压低再归一等于没压。引用片段靠这个把原声退到背景。
         again = f",volume={float(audio_gain_db):.1f}dB" if audio_gain_db else ""

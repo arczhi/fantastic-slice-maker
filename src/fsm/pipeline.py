@@ -79,7 +79,7 @@ def process(
         return {"ok": False, "video": str(video), "error": "file not found"}
 
     mode = (mode or ("commentary" if cfg.commentary.enabled else "clip")).lower()
-    commentary_mode = mode == "commentary"
+    commentary_mode = mode in ("commentary", "overlay")
 
     vid = video_id_of(video)
     work = ensure_dir(Path(cfg.paths.work) / vid)
@@ -217,7 +217,8 @@ def process(
         if commentary_mode:
             try:
                 with book.run(f"commentary_{v}_{i}"):
-                    cres = commentary.build(
+                    fn = commentary.build_overlay if mode == "overlay" else commentary.build
+                    cres = fn(
                         src=str(video), reel=reel,
                         work=work / f"v{v:02d}" / f"reel{i:02d}",
                         out_dir=out_dir, cfg=cfg, info=info, sentences=sentences,
@@ -247,7 +248,7 @@ def process(
             if cover:
                 produced.add(cover.name)
             results.append({
-                "index": i, "variant": v, "ok": True, "mode": "commentary",
+                "index": i, "variant": v, "ok": True, "mode": mode,
                 "title": cres["title"], "hook": reel.get("hook", ""),
                 "reason": reel.get("reason", ""),
                 "path": cres["path"], "cover": str(cover) if cover else None,
@@ -580,9 +581,11 @@ def _write_markdown(report: dict, path: Path) -> None:
                 f"- 钩子：{r['hook']}",
                 f"- 编排：{r['reason']}",
             ]
-            if r.get("mode") == "commentary":
+            if r.get("mode") in ("commentary", "overlay"):
+                tail = ("口播压原片+叠加字幕" if r.get("mode") == "overlay"
+                        else "口播为主体")
                 lines.append(f"- 引用占比：{r.get('quote_ratio', 0):.0%}"
-                             f"（{r.get('quote_total', 0)}s），口播为主体")
+                             f"（{r.get('quote_total', 0)}s），{tail}")
                 if r.get("degraded"):
                     lines.append("- **口播词是规则兜底版，发布前必须人工重写**")
                 if r.get("md"):

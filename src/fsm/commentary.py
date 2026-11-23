@@ -209,6 +209,196 @@ def build(
 
 # ---------------------------------------------------------------- 选段
 
+
+def build_overlay(
+    src: str, reel: dict, work: Path, out_dir: Path, cfg: Config,
+    info, sentences: list[dict], shots: list[dict], vis: dict,
+    *, tag: str, variant: int = 1, index: int = 1, strips: list[dict] | None = None,
+) -> dict:
+    """叠加解说片：画面全程用原片（无独立文字卡），解说字幕叠在原画面上。
+
+    与 commentary.build 的差别：
+    - 口播段不再渲染成深底文字卡，而是取口播对应引用位置附近的**原片画面**
+      铺满画布，口播 TTS 压在压低的原声上，口播词按字符数均匀切成字幕条，
+      用 subtitle.render_png 出 PNG 叠在原画面底边——「解说字幕放在原视频上」。
+    - 引用片段全幅展示（不内缩），原声不压——两段解说之间留一段原声台词
+      作呼吸口，形态上就是一条带解说的原片剪辑。
+    - 去水印走 cfg.render.dewatermark（delogo/crop），全程生效。
+    """
+    ccfg = cfg.commentary
+    work = ensure_dir(Path(work))
+    title_hint = reel.get("title") or ""
+    strips = strips or []
+
+    # 1-2. 选段与引用窗口：与文字卡版完全同源
+    beats = render.snap_to_shots(reel.get("beats") or [], shots)
+    beats = render.trim_blank(beats, vis)
+    beats = render.order_beats(beats)
+    if not beats:
+        raise RuntimeError("no usable beats for overlay commentary")
+    for b in beats:
+        b["line"] = _text_in(strips, sentences, b["start"], b["end"], 110)
+    quotes = _pick_quotes(beats, sentences, ccfg, info.duration)
+    if not quotes:
+        raise RuntimeError("no quote window")
+    n_talks = len(quotes) + 1
+
+    # 3. 口播词
+    talks, meta, degraded = _narrate(quotes, n_talks, title_hint, cfg)
+    while len(talks) < n_talks:
+        talks.append({"i": len(talks), "text": talks[-1]["text"]})
+    talks = talks[:n_talks]
+
+    # 4. 时长闸门：估算总时长超上限就从尾部丢引用（合并口播），保住完播率
+    def _est_dur() -> float:
+        t = sum(ccfg.lead_pad + len(x["text"]) / 8.0 for x in talks)
+        q = sum(float(q["end"]) - float(q["start"]) for q in quotes)
+        return t + q
+
+    while _est_dur() > ccfg.target_seconds + 6 and len(quotes) > 1:
+        quotes = quotes[:-1]
+        talks = talks[:-1]
+    n_talks = len(quotes) + 1
+    talks = talks[:n_talks]
+
+    # 5. 逐段产出：口播压原片 + 字幕叠加；引用段全幅原声
+    seg_dir = ensure_dir(work / "seg")
+    sub_dir = ensure_dir(work / "subs")
+    quote_dir = ensure_dir(out_dir / "quotes" / tag)
+    lay = subtitle.layout_of(info.width, info.height,
+                             cfg.render.width, cfg.render.height, cfg.subtitle)
+    segments: list[Path] = []
+    timeline: list[dict] = []
+    talk_sec = 0.0
+    quote_sec = 0.0
+
+    for i, talk in enumerate(talks):
+        text = talk["text"]
+        wav = seg_dir / f"t{i:02d}.wav"
+        tts_sec = _tts(text, wav, ccfg)
+        dur = round(tts_sec + ccfg.lead_pad, 2)
+
+        # 画面窗口：引用句起始位置往后铺满口播时长，贴近句首让画面与解说对齐
+        if i < len(quotes):
+            q0 = float(quotes[i]["start"])
+        else:
+            # 收尾口播：从最后一个引用句结束继续往后放原片
+            q0 = float(quotes[-1]["end"]) + 0.4
+        bg_start = max(0.0, min(q0, info.duration - dur - 0.5))
+        bg_dur = min(dur, max(0.5, info.duration - bg_start))
+
+        # 解说字幕：按字符数占比把口播词切成 ≤2 行的字幕条，均匀铺在 TTS 时长上
+        lines = subtitle.split_text(text, cfg.subtitle.max_chars)
+        # 两行一组作为一条字幕
+        groups = [lines[k:k + 2] for k in range(0, len(lines), 2)] or [[text]]
+        total_chars = sum(len(g[0]) + len(g[1]) if len(g) > 1 else len(g[0])
+                          for g in groups) or 1
+        subs: list[dict] = []
+        cum = 0.0
+        for gi, g in enumerate(groups):
+            gchars = len(g[0]) + (len(g[1]) if len(g) > 1 else 0)
+            cstart = cum / total_chars * tts_sec
+            cum += gchars
+            cend = cum / total_chars * tts_sec
+            png = sub_dir / f"t{i:02d}_{gi:02d}.png"
+            try:
+                h = subtitle.render_png(g, lay, cfg.subtitle, png)
+            except Exception as e:                       # noqa: BLE001
+                log.warning(f"解说字幕渲染失败 {g[0][:12]}: {e}")
+                continue
+            subs.append({
+                "png": png,
+                "start": round(cstart, 3),
+                "end": round(max(cend, cstart + 0.5), 3),
+                "y": max(0, lay["bottom"] - h),
+            })
+        seg = seg_dir / f"s{i:02d}_talk.mp4"
+        ffmpeg.cut(
+            src, seg, bg_start, bg_start + bg_dur,
+            width=cfg.render.width, height=cfg.render.height,
+            fps=cfg.render.fps, crf=cfg.render.crf, preset=cfg.render.preset,
+            loudness_i=cfg.render.loudness_i, blur_sigma=cfg.render.blur_sigma,
+            audio_bitrate=cfg.render.audio_bitrate, timeout=cfg.render.timeout,
+            has_audio=info.has_audio, threads=cfg.render.threads,
+            src_size=(info.width, info.height), blur_div=cfg.render.blur_div,
+            encoder=("libx264" if cfg.render.encoder == "auto" else cfg.render.encoder),
+            vt_bitrate=cfg.render.vt_bitrate, dewatermark=cfg.render.dewatermark,
+            fit=cfg.render.fit,
+            inset=1.0,                                   # 全幅，无内缩边
+            audio_gain_db=ccfg.quote_audio_gain_db,      # 原声退到背景
+            subs=subs,
+            extra_audio=(wav if wav.exists() else None),  # TTS 压在原声上
+        )
+        segments.append(seg)
+        talk_sec += dur
+        timeline.append({
+            "kind": "talk_over", "i": i, "text": text, "dur": dur,
+            "start": round(bg_start, 2), "subs": len(subs),
+            "tts": "say" if wav.exists() else "none",
+        })
+
+        if i < len(quotes):
+            q = quotes[i]
+            qpath = quote_dir / f"q{i + 1:02d}_{q['role']}.mp4"
+            ffmpeg.cut(
+                src, qpath, q["start"], q["end"],
+                width=cfg.render.width, height=cfg.render.height,
+                fps=cfg.render.fps, crf=cfg.render.crf, preset=cfg.render.preset,
+                loudness_i=cfg.render.loudness_i, blur_sigma=cfg.render.blur_sigma,
+                audio_bitrate=cfg.render.audio_bitrate, timeout=cfg.render.timeout,
+                has_audio=info.has_audio, threads=cfg.render.threads,
+                src_size=(info.width, info.height), blur_div=cfg.render.blur_div,
+                encoder=("libx264" if cfg.render.encoder == "auto" else cfg.render.encoder),
+                vt_bitrate=cfg.render.vt_bitrate, dewatermark=cfg.render.dewatermark,
+                fit=cfg.render.fit,
+                inset=1.0,                               # 全幅，两段解说之间的原声呼吸口
+                audio_gain_db=0.0,
+            )
+            segments.append(qpath)
+            qdur = ffmpeg.probe(qpath).duration
+            quote_sec += qdur
+            timeline.append({
+                "kind": "quote", "i": i, "file": str(qpath.relative_to(out_dir)),
+                "start": q["start"], "end": q["end"], "dur": round(qdur, 2),
+                "role": q["role"], "text": q["text"], "note": q.get("note", ""),
+            })
+
+    # 6. 组装
+    stem = f"{tag}_{safe_name(meta.get('title') or title_hint or '解说', 22)}"
+    final = out_dir / f"{stem}.mp4"
+    ffmpeg.concat(
+        segments, final, reencode=True, crf=cfg.render.crf,
+        preset=cfg.render.preset, width=cfg.render.width, height=cfg.render.height,
+        fps=cfg.render.fps, threads=cfg.render.threads,
+    )
+
+    total = ffmpeg.probe(final).duration
+    ratio = round(quote_sec / total, 4) if total else 0.0
+
+    # 7. 脚本落盘
+    script = {
+        "tag": tag, "variant": variant, "index": index, "mode": "overlay",
+        "video": str(src), "title": meta.get("title", ""), "desc": meta.get("desc", ""),
+        "degraded": degraded, "warnings": meta.get("warnings") or [],
+        "duration": round(total, 2),
+        "quote_total": round(quote_sec, 2), "talk_total": round(talk_sec, 2),
+        "quote_ratio": ratio,
+        "segments": timeline,
+    }
+    sdir = ensure_dir(out_dir / "script")
+    atomic_write_json(sdir / f"{stem}.json", script)
+    _write_md(script, sdir / f"{stem}.md", ccfg)
+
+    files = {p.name for p in [final] + segments}
+    return {
+        "path": str(final), "stem": stem, "duration": round(total, 2),
+        "script": str(sdir / f"{stem}.json"), "md": str(sdir / f"{stem}.md"),
+        "title": meta.get("title") or title_hint, "desc": meta.get("desc", ""),
+        "quote_ratio": ratio, "quote_total": round(quote_sec, 2),
+        "degraded": degraded, "segments": timeline, "files": files,
+        "mode": "overlay",
+    }
+
 def _text_in(strips: list[dict], sentences: list[dict],
              start: float, end: float, limit: int = 100) -> str:
     """取区间内的台词：OCR 硬字幕优先，退回 ASR 句子。
@@ -559,7 +749,11 @@ def _write_md(script: dict, path: Path, ccfg: CommentaryCfg) -> None:
             lines.append(f"- 注意：{w}")
         lines += ["", "## 分镜（照这个顺序剪/拍）", ""]
         for s in script["segments"]:
-            if s["kind"] == "talk":
+            if s["kind"] == "talk_over":
+                lines += [f"### 口播 {s['i'] + 1}（{s['dur']}s，压原片 "
+                          f"{s['start']:.1f}s 起，{s.get('subs', 0)} 条叠加字幕）", "",
+                          f"> {s['text']}", ""]
+            elif s["kind"] == "talk":
                 lines += [f"### 口播 {s['i'] + 1}（{s['dur']}s，文字卡）", "",
                           f"> {s['text']}", ""]
             else:
