@@ -153,6 +153,56 @@ def extract(src: str, cfg: OCRCfg, duration: float = 0.0) -> list[dict]:
     return strips
 
 
+
+
+def band_top(src: str, cfg: OCRCfg, duration: float, samples: int = 6) -> float:
+    """采样若干帧，返回原片字幕带顶边占画面高度的比例（中位数）。
+
+    用途：把「分镜解说」文字卡放在原字幕上方。整片 OCR 的 strips 不带坐标，
+    这里只做轻量采样，不参与字幕判定，失败返回 0。
+    """
+    if duration <= 0:
+        return 0.0
+    import subprocess
+
+    try:
+        engine = _load_engine(cfg)
+    except Exception:
+        return 0.0
+    ratios: list[float] = []
+    for i in range(max(1, samples)):
+        t = duration * (i + 0.5) / samples
+        try:
+            raw = subprocess.run(
+                ["ffmpeg", "-v", "error", "-ss", f"{t:.2f}", "-i", str(src),
+                 "-frames:v", "1", "-f", "image2pipe", "-vcodec", "png", "-"],
+                capture_output=True, timeout=30).stdout
+            img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+            if img is None:
+                continue
+            h = img.shape[0]
+            res, _ = engine(img)
+            ys = []
+            for item in res or []:
+                try:
+                    box = item[0]
+                    if not _clean(item[1]):
+                        continue
+                    yy = [float(p[1]) for p in box]
+                    if (max(yy) - min(yy)) > h * 0.02 and (sum(yy) / len(yy)) > h * 0.55:
+                        ys.append(min(yy))
+                except (TypeError, ValueError, IndexError):
+                    continue
+            if ys:
+                ratios.append(min(ys) / h)
+        except Exception:
+            continue
+    if not ratios:
+        return 0.0
+    ratios.sort()
+    return round(float(ratios[len(ratios) // 2]), 4)
+
+
 def _group(rows: list[dict], fps: float, duration: float, min_conf: float) -> list[dict]:
     """把逐帧识别结果合并成字幕条，丢掉单帧低置信的误检。"""
     strips: list[dict] = []

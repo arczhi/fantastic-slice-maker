@@ -114,6 +114,27 @@ def process(
 
     # ---------------------------------------------------------------- 信号（并行）
     shots, vis, sentences, strips = _signals(video, info, work, book, cfg, force)
+    # 分镜解说文字卡：用 OCR 采样定位原字幕带顶边，把解说放在它上方一点点。
+    try:
+        from .signals.ocr import band_top as _band_top
+        ratio = _band_top(str(video), cfg.ocr, info.duration)
+        if ratio:
+            sh = info.height
+            dw = cfg.render.dewatermark
+            top_crop = 0
+            if str(getattr(dw, "mode", "")).lower() == "crop":
+                top_crop = int(sh * float(getattr(dw, "crop_ratio", 0) or 0)) // 2 * 2
+            ch = max(1, sh - top_crop)
+            ov = cfg.render.overlay
+            z = max(1.0, ov.zoom)
+            y = ((ratio * sh - top_crop) * (cfg.render.height / ch) * z
+                 - (cfg.render.height * (z - 1)) / 2)
+            cap_h = ov.caption_size * 2.4
+            ov.caption_top = int(max(120, min(cfg.render.height * 0.9,
+                                              y - cap_h - 16)))
+            log.info(f"解说位置：OCR 字幕顶 {ratio:.3f} → caption_top={ov.caption_top}")
+    except Exception as e:                           # noqa: BLE001
+        log.debug(f"band_top 采样失败，沿用配置位置: {e}")
 
     # ---------------------------------------------------------------- 时间轴
     tl = read_json(work / "timeline.json") if book.ok("timeline") and not force else None
