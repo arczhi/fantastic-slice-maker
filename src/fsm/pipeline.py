@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import json
 import shutil
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
@@ -12,7 +13,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from . import bgm, commentary, digest, ffmpeg, overlay, planner, qc, recall, render, subtitle, timeline
+from . import bgm, commentary, digest, ffmpeg, overlay, planner, qc, recall, render, shots_desc, subtitle, timeline
 from .config import Config
 from .signals import asr as asr_sig
 from .signals import ocr as ocr_sig
@@ -301,6 +302,12 @@ def process(
         if track:
             beats, align_stats = bgm.align_to_beats(
                 beats, track, pick["start"], cfg.bgm, vis)
+
+        # 分镜描述：按 shots 的真实切点给每个镜头一句，挂在 beat.shot_descs 上。
+        try:
+            shots_desc.build(beats, tl.get("shots") or [], sentences, cfg.planner)
+        except Exception as e:                       # noqa: BLE001
+            log.warning(f"[{vid}] v{v} reel{i} 分镜描述失败，退回 beat caption: {e}")
 
         # 字幕必须在 align 之后算：align_to_beats 会把段尾延长到鼓点，
         # 用延长前的区间算字幕会漏掉最后一两句台词。

@@ -145,8 +145,8 @@ render:
     enabled: true
     zoom: 1.06                 # 先放大 6% 再居中裁回 1080x1920，把边缘水印切掉
     caption_enabled: true
-    caption_top: 64            # 分镜描述距顶部像素
-    caption_size: 38
+    caption_top: 380           # 分镜描述距顶部像素（避开快手顶部 UI 与右上角水印）
+    caption_size: 44
     watermark_enabled: true
     watermark_text: "短剧小当家"
     watermark_size: 40

@@ -85,12 +85,28 @@ def apply(video: str | Path, out: str | Path, beats: list[dict],
     t = 0.0
     for i, b in enumerate(beats):
         dur = float(b.get("dur") or 0)
-        cap = (b.get("caption") or "").strip()
-        if ov.caption_enabled and cap:
-            png = _text_png(cap, size=ov.caption_size, color=ov.caption_color,
-                            stroke=ov.caption_stroke, opacity=1.0,
-                            out=work / f"cap_{i:02d}.png", bg=True)
-            caps.append((png, t, t + dur))
+        if not ov.caption_enabled:
+            t += dur
+            continue
+        # 优先用镜头级描述：一个 beat 里画面切几次，文字就换几次。
+        subs = b.get("shot_descs") or []
+        if subs:
+            for j, sd in enumerate(subs):
+                text = (sd.get("text") or "").strip()
+                if not text:
+                    continue
+                png = _text_png(text, size=ov.caption_size, color=ov.caption_color,
+                                stroke=ov.caption_stroke, opacity=1.0,
+                                out=work / f"cap_{i:02d}_{j:02d}.png", bg=True)
+                caps.append((png, t + float(sd.get("t0") or 0),
+                             t + float(sd.get("t1") or 0)))
+        else:
+            cap = (b.get("caption") or "").strip()
+            if cap:
+                png = _text_png(cap, size=ov.caption_size, color=ov.caption_color,
+                                stroke=ov.caption_stroke, opacity=1.0,
+                                out=work / f"cap_{i:02d}.png", bg=True)
+                caps.append((png, t, t + dur))
         t += dur
 
     wm = _watermark_png(ov.watermark_text, ov, work / "watermark.png") if ov.watermark_enabled else None
