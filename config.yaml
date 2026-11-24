@@ -48,11 +48,11 @@ vision:
 bgm:
   enabled: true
   gain_db: 0.0
-  bgm_lufs: -20.0
-  duck_threshold: 0.15
-  duck_ratio: 2.5
-  fade_in: 0.4
-  fade_out: 1.2
+  bgm_lufs: -17.0
+  duck_threshold: 0.10
+  duck_ratio: 3.5
+  fade_in: 0.3
+  fade_out: 0.8
   target_loudness: -14.0
   max_stretch: 0.45
   min_beat_cv: 0.22
@@ -139,6 +139,21 @@ render:
   # auto：上下模糊 + 原画面居中，画面完整但非满屏（默认）
   # crop：按 9:16 居中裁切再缩放，成片满屏，代价是左右各切掉较多
   fit: auto
+
+  # 成片叠加层（2026-11-24）：放大裁切去水印 + 分镜描述 + 旋转水印
+  overlay:
+    enabled: true
+    zoom: 1.06                 # 先放大 6% 再居中裁回 1080x1920，把边缘水印切掉
+    caption_enabled: true
+    caption_top: 64            # 分镜描述距顶部像素
+    caption_size: 38
+    watermark_enabled: true
+    watermark_text: "短剧小当家"
+    watermark_size: 40
+    watermark_opacity: 0.55
+    watermark_top: 90
+    watermark_right: 36
+    watermark_rotate_seconds: 7.0
 
 # 自动补字幕：源片没有内嵌字幕时（OCR 字幕覆盖率低），用 ASR 句子生成字幕烧进成片。
 # 本机 ffmpeg 是精简构建（无 libass），所以走 PIL 渲染 PNG + overlay，

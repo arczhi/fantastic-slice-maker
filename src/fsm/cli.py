@@ -79,6 +79,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("run", help="处理单个视频")
     sp.add_argument("video")
+    sp.add_argument("--delogo", action="append", default=[], metavar="X,Y,W,H",
+                    help="额外的 delogo 框（可重复），用于画面中间的水印；例如 40,420,150,70")
     add_common(sp)
 
     sp = sub.add_parser("batch", help="批量处理目录或文件列表")
@@ -143,6 +145,13 @@ def _setup(args) -> None:
 
 def cmd_run(args) -> int:
     cfg = _cfg(args)
+    for spec in getattr(args, "delogo", None) or []:
+        try:
+            x, y, w, h = [int(v) for v in str(spec).replace("，", ",").split(",")]
+        except ValueError:
+            print(f"--delogo 格式应为 x,y,w,h：{spec}")
+            return 2
+        cfg.render.dewatermark.boxes.append([x, y, w, h])
     _ensure_asr(cfg, wait=False)
     try:
         rep = process(args.video, cfg, n_reels=args.reels, force=args.force,

@@ -194,6 +194,30 @@ def _fills_canvas(src_w: int, src_h: int, width: int, height: int) -> bool:
     return width * src_h / src_w >= height
 
 
+
+def _delogo_parts(dw, size: tuple[int, int] | None) -> list[str]:
+    """把 boxes 归一成 delogo 滤镜片段；越界自动夹到画面内。"""
+    raw = list(getattr(dw, "boxes", None) or [])
+    if not raw and (getattr(dw, "w", 0) or 0) > 0:
+        raw = [[getattr(dw, "x", 0), getattr(dw, "y", 0),
+                getattr(dw, "w", 0), getattr(dw, "h", 0)]]
+    parts: list[str] = []
+    for b in raw:
+        if len(b) != 4:
+            continue
+        bw, bh = int(b[2] or 0), int(b[3] or 0)
+        bx, by = int(b[0] or 0), int(b[1] or 0)
+        if bw <= 0 or bh <= 0:
+            continue
+        if size is not None:
+            bx = max(1, min(bx, size[0] - 2))
+            by = max(1, min(by, size[1] - 2))
+            bw = min(bw, size[0] - bx - 1)
+            bh = min(bh, size[1] - by - 1)
+        parts.append(f"delogo=x={bx}:y={by}:w={bw}:h={bh}")
+    return parts
+
+
 def _dewatermark_prefix(dw, src_size: tuple[int, int] | None,
                         src: str | Path, width: int = 1080,
                         height: int = 1920) -> tuple[str, tuple[int, int] | None]:
@@ -240,19 +264,20 @@ def _dewatermark_prefix(dw, src_size: tuple[int, int] | None,
             cw = sw // 2 * 2
         if cw >= sw * 0.8:
             cx = (sw - cw) // 2 // 2 * 2
-            return f"crop={cw}:{ch}:{cx}:{top},", (cw, ch)
+            dl = _delogo_parts(dw, size)
+            pre = (",".join(dl) + ",") if dl else ""
+            return pre + f"crop={cw}:{ch}:{cx}:{top},", (cw, ch)
         # 侧裁会丢掉两成以上宽度（横屏源按 9:16 裁更是要砍掉大半），不值当。
         # 此时只去掉顶部水印，剩下的交给模糊填充路径：整幅画面都在，只是上下补模糊。
-        return f"crop=iw:ih-{top}:0:{top},", (sw, ch)
+        dl = _delogo_parts(dw, size)
+        pre = (",".join(dl) + ",") if dl else ""
+        return pre + f"crop=iw:ih-{top}:0:{top},", (sw, ch)
 
     if mode == "delogo":
-        # 多框优先：拼接合集源每段台标位置不同，用 boxes 一次链式修掉。
-        raw = list(getattr(dw, "boxes", None) or [])
-        if not raw and (getattr(dw, "w", 0) or 0) > 0:
-            raw = [[getattr(dw, "x", 0), getattr(dw, "y", 0),
-                    getattr(dw, "w", 0), getattr(dw, "h", 0)]]
-        if not raw:
+        parts = _delogo_parts(dw, size)
+        if not parts:
             return "", size
+        return ",".join(parts) + ",", size
         parts = []
         for b in raw:
             if len(b) != 4:

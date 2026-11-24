@@ -177,6 +177,31 @@ class DewatermarkCfg:
 
 
 @dataclass
+class OverlayCfg:
+    """成片叠加层：放大裁切去水印 + 分镜文字描述 + 旋转水印。
+
+    2026-11-24 用户要求：
+    - 原片默认放大一点再裁，把边缘的搬运水印切掉；
+    - 每个镜头（beat）在顶部显示一句剧情描述（plan 里的 caption）；
+    - 全局带「短剧小当家」旋转水印。
+    """
+    enabled: bool = True
+    zoom: float = 1.06                  # 先放大再居中裁回 1080x1920，切掉边缘
+    caption_enabled: bool = True
+    caption_top: int = 64
+    caption_size: int = 38
+    caption_color: str = "#FFFFFF"
+    caption_stroke: int = 3
+    watermark_enabled: bool = True
+    watermark_text: str = "短剧小当家"
+    watermark_size: int = 40
+    watermark_opacity: float = 0.55
+    watermark_top: int = 90
+    watermark_right: int = 36
+    watermark_rotate_seconds: float = 7.0
+
+
+@dataclass
 class RenderCfg:
     width: int = 1080
     height: int = 1920
@@ -194,6 +219,7 @@ class RenderCfg:
     gpu_slots: int = 2               # 硬编（VideoToolbox）并发槽位，与 CPU 槽位互不争抢
     vt_bitrate: str = "6M"           # 硬编码率，硬编只能定码率
     dewatermark: DewatermarkCfg = field(default_factory=DewatermarkCfg)
+    overlay: OverlayCfg = field(default_factory=OverlayCfg)
     # auto：横屏源走「上下模糊 + 原画面居中」，画面完整但非满屏（默认，老行为）
     # crop：横屏源按 9:16 居中裁切再缩放，成片满屏，代价是左右切掉较多
     fit: str = "auto"

@@ -12,7 +12,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from . import bgm, commentary, digest, ffmpeg, planner, qc, recall, render, subtitle, timeline
+from . import bgm, commentary, digest, ffmpeg, overlay, planner, qc, recall, render, subtitle, timeline
 from .config import Config
 from .signals import asr as asr_sig
 from .signals import ocr as ocr_sig
@@ -205,7 +205,23 @@ def process(
     tracks = (bgm.load_index(cfg.bgm)
               if (cfg.bgm.enabled and (not commentary_mode or cfg.commentary.bgm)) else [])
     flat_reels = [r for _, _, r in reels_flat]
-    picks = bgm.choose(tracks, flat_reels, cfg.planner, cfg.bgm) if tracks else []
+    # 不同剧用不同的曲子：把最近用过的 id 传给选曲，选完回写。
+    recent_path = Path(cfg.paths.work) / "bgm_recent.json"
+    try:
+        recent = json.loads(recent_path.read_text(encoding="utf-8"))
+        if not isinstance(recent, list):
+            recent = []
+    except (OSError, ValueError):
+        recent = []
+    picks = bgm.choose(tracks, flat_reels, cfg.planner, cfg.bgm,
+                       avoid=set(recent[-8:])) if tracks else []
+    used = [p.get("bgm_id") for p in picks if p.get("bgm_id")]
+    if used:
+        recent = (recent + used)[-20:]
+        try:
+            recent_path.write_text(json.dumps(recent, ensure_ascii=False), encoding="utf-8")
+        except OSError:
+            pass
     if tracks:
         log.info(f"[{vid}] BGM 库 {len(tracks)} 首，已为 {len(picks)} 条切片选曲")
     else:
@@ -310,6 +326,17 @@ def process(
             log.warning(f"[{vid}] render v{v}-{i} failed: {e}")
             results.append({"index": i, "variant": v, "ok": False, "error": str(e)[:300]})
             continue
+
+        # 叠加层：放大裁切（去边缘水印）+ 分镜描述 + 旋转水印。
+        # 放在拼接之后、混音之前，一次重编码完成。
+        try:
+            with book.run(f"overlay_{v}_{i}"):
+                over_path = work / f"v{v:02d}" / f"reel{i:02d}" / "overlay.mp4"
+                overlay.apply(str(rendered["path"]), str(over_path), beats,
+                              cfg.render, work / f"v{v:02d}" / f"reel{i:02d}")
+            rendered["path"] = str(over_path)
+        except Exception as e:                       # noqa: BLE001
+            log.warning(f"[{vid}] v{v} reel {i} 叠加层失败，保留无叠加版本: {e}")
 
         # 混音放在拼接之后：这样 BGM 是一条连续的曲子，
         # 而不是每个片段各自 fade-in 一遍。

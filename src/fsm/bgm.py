@@ -29,7 +29,7 @@ from .util import get_logger
 log = get_logger("bgm")
 
 SYSTEM = (
-    "你是短视频配乐师，为古装/修仙漫剧的抖音切片选背景音乐。"
+    "你是短视频配乐师，为苦情/家庭/都市短剧的抖音、快手切片选背景音乐。"
     "只输出 JSON，不输出解释。"
 )
 
@@ -39,13 +39,13 @@ TEMPLATE = """下面是一部漫剧的 {n} 条切片方案，以及一个可选�
 
 {library}
 
-切片方案：
+{avoid_note}切片方案：
 
 {reels}
 
 请为每条切片各选一首配乐，要求：
-1. 配乐情绪要和切片主情绪一致：打斗/对峙配 epic 或 tense，悲情配 somber，
-   神秘/古风配 mystical，爽感反杀配 uplifting。
+1. 配乐情绪要和切片主情绪一致：委屈/苦情配 somber 或 emotional，当众对峙/羞辱配 tense，
+   身份揭穿/反杀配 uplifting，家庭日常配 warm。宁可保守，不要用打斗 epic 盖住台词。
 2. 配乐时长必须 >= 切片时长（否则会提前断掉）。
 3. BPM 建议 90-140，太慢会拖节奏，太快会让台词显得赶。
 4. 同一部剧的多条切片尽量用不同的曲子，避免观众刷到重复。
@@ -139,7 +139,7 @@ def _fallback_track(tracks: list[dict], reel: dict, used: set[str],
 
 
 def choose(tracks: list[dict], reels: list[dict], cfg: PlannerCfg,
-           bgm_cfg: BGMCfg) -> list[dict]:
+           bgm_cfg: BGMCfg, avoid: set[str] | None = None) -> list[dict]:
     """为每条切片返回 {bgm_id, start_ratio, reason}。永不抛异常。"""
     if not tracks or not reels:
         return []
@@ -147,11 +147,21 @@ def choose(tracks: list[dict], reels: list[dict], cfg: PlannerCfg,
     need = [sum(float(b.get("dur") or 0) for b in r.get("beats") or []) for r in reels]
     # 时长不够的曲子直接过滤，避免出现"配乐提前结束"
     usable = [t for t in tracks if t["duration"] >= min(need) * 0.95] or tracks
+    # 不同剧尽量不用同一首：把最近用过的曲子排除掉，但至少留够本剧的条数。
+    if avoid:
+        fresh = [t for t in usable if t["id"] not in avoid]
+        if len(fresh) >= len(reels):
+            usable = fresh
     picked: list[dict] = []
 
     if cfg.enabled and cfg.api_key:
+        note = ""
+        if avoid:
+            note = ("最近其他剧已经用过这些曲子，本次尽量避开，避免观众耳熟："
+                    + "、".join(sorted(avoid)) + "。\n\n")
         prompt = TEMPLATE.format(
             n=len(reels), library=_fmt_library(usable), reels=_fmt_reels(reels),
+            avoid_note=note,
         )
         for attempt, temp in enumerate((cfg.temperature, 0.4), start=1):
             try:
