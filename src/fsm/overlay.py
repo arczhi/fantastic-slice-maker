@@ -29,21 +29,41 @@ def _hex_rgba(color: str, alpha: int) -> tuple[int, int, int, int]:
 
 
 def _text_png(text: str, *, size: int, color: str, stroke: int, opacity: float,
-              out: Path, pad: int = 18, bg: bool = False) -> Path:
+              out: Path, pad: int = 18, bg: bool = False,
+              max_width: int = 0) -> Path:
+    """把一句话画成透明 PNG；超过 max_width 自动折成两行（最多两行）。"""
     font = ImageFont.truetype(_font_path(), size)
     dummy = Image.new("RGBA", (10, 10))
     d = ImageDraw.Draw(dummy)
-    bbox = d.textbbox((0, 0), text, font=font, stroke_width=stroke)
-    w = bbox[2] - bbox[0] + pad * 2
-    h = bbox[3] - bbox[1] + pad * 2
+
+    lines = [text]
+    if max_width > 0 and d.textlength(text, font=font) > max_width:
+        best: tuple[int, int] | None = None
+        for i in range(3, len(text) - 2):
+            w1 = d.textlength(text[:i], font=font)
+            w2 = d.textlength(text[i:], font=font)
+            if w1 <= max_width and w2 <= max_width:
+                score = abs(w1 - w2)
+                if best is None or score < best[0]:
+                    best = (score, i)
+        if best is not None:
+            lines = [text[:best[1]], text[best[1]:]]
+
+    boxes = [d.textbbox((0, 0), ln, font=font, stroke_width=stroke) for ln in lines]
+    line_h = max(b[3] - b[1] for b in boxes)
+    w = max(b[2] - b[0] for b in boxes) + pad * 2
+    h = line_h * len(lines) + pad * 2
     img = Image.new("RGBA", (max(1, w), max(1, h)), (0, 0, 0, 0))
     dr = ImageDraw.Draw(img)
     if bg:
-        dr.rounded_rectangle([0, 0, w - 1, h - 1], radius=max(8, h // 4),
+        dr.rounded_rectangle([0, 0, w - 1, h - 1], radius=max(8, line_h // 4),
                              fill=(0, 0, 0, 150))
     fill = _hex_rgba(color, int(255 * opacity))
-    dr.text((pad - bbox[0], pad - bbox[1]), text, font=font, fill=fill,
-            stroke_width=stroke, stroke_fill=(0, 0, 0, int(210 * opacity)))
+    for i, ln in enumerate(lines):
+        bw = boxes[i][2] - boxes[i][0]
+        dr.text(((w - bw) / 2 - boxes[i][0], pad + i * line_h - boxes[i][1]),
+                ln, font=font, fill=fill, stroke_width=stroke,
+                stroke_fill=(0, 0, 0, int(210 * opacity)))
     out.parent.mkdir(parents=True, exist_ok=True)
     img.save(out)
     return out
@@ -97,7 +117,8 @@ def apply(video: str | Path, out: str | Path, beats: list[dict],
                     continue
                 png = _text_png(text, size=ov.caption_size, color=ov.caption_color,
                                 stroke=ov.caption_stroke, opacity=1.0,
-                                out=work / f"cap_{i:02d}_{j:02d}.png", bg=True)
+                                out=work / f"cap_{i:02d}_{j:02d}.png", bg=True,
+                                max_width=int(cfg.width * 0.86))
                 caps.append((png, t + float(sd.get("t0") or 0),
                              t + float(sd.get("t1") or 0)))
         else:
@@ -105,7 +126,8 @@ def apply(video: str | Path, out: str | Path, beats: list[dict],
             if cap:
                 png = _text_png(cap, size=ov.caption_size, color=ov.caption_color,
                                 stroke=ov.caption_stroke, opacity=1.0,
-                                out=work / f"cap_{i:02d}.png", bg=True)
+                                out=work / f"cap_{i:02d}.png", bg=True,
+                                max_width=int(cfg.width * 0.86))
                 caps.append((png, t, t + dur))
         t += dur
 
@@ -122,9 +144,13 @@ def apply(video: str | Path, out: str | Path, beats: list[dict],
     parts = [f"[0:v]scale=trunc(iw*{z:.4f}/2)*2:trunc(ih*{z:.4f}/2)*2,"
              f"crop={W}:{H},setsar=1[base]"]
     last = "base"
-    for i, (_, a, b) in enumerate(caps, start=1):
+    box_h = max(1, int(ov.caption_size * 4.0))
+    from PIL import Image as _Image
+    for i, (png, a, b) in enumerate(caps, start=1):
+        h = _Image.open(png).size[1]
+        y = ov.caption_top + max(0, box_h - h)
         parts.append(f"[{i}:v]format=rgba[c{i}]")
-        parts.append(f"[{last}][c{i}]overlay=x=(W-w)/2:y={ov.caption_top}"
+        parts.append(f"[{last}][c{i}]overlay=x=(W-w)/2:y={y}"
                      f":enable='between(t,{a:.3f},{b:.3f})'[v{i}]")
         last = f"v{i}"
     if wm:

@@ -129,7 +129,7 @@ def process(
             z = max(1.0, ov.zoom)
             y = ((ratio * sh - top_crop) * (cfg.render.height / ch) * z
                  - (cfg.render.height * (z - 1)) / 2)
-            cap_h = ov.caption_size * 2.4
+            cap_h = ov.caption_size * 4.0
             ov.caption_top = int(max(120, min(cfg.render.height * 0.9,
                                               y - cap_h - 16)))
             log.info(f"解说位置：OCR 字幕顶 {ratio:.3f} → caption_top={ov.caption_top}")

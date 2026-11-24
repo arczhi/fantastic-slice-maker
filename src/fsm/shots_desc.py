@@ -21,7 +21,7 @@ SYSTEM = "你是竖屏短剧的剪辑师，为一条切片写分镜描述。只�
 
 TEMPLATE = """下面是一条竖屏短剧切片的镜头列表。每个镜头给了切片内时间、原片时间和这段的台词。
 
-请为每个镜头写一句 4-10 个字的剧情描述，要求：
+请为每个镜头写一句 6-14 个字的剧情描述，要求：
 1. 说清这一镜在发生什么（谁、对谁、做了什么），不要照抄台词；
 2. 不要剧透后面的反转，不要写“镜头”“画面”这类词；
 3. 一句话，不要标点结尾。
@@ -95,6 +95,6 @@ def build(beats: list[dict], shots: list[dict], sentences: list[dict],
         if not desc:
             continue
         beats[r["beat"]].setdefault("shot_descs", []).append(
-            {"t0": r["t0"], "t1": r["t1"], "text": desc[:10]})
+            {"t0": r["t0"], "t1": r["t1"], "text": desc[:18]})
     n = sum(len(b.get("shot_descs") or []) for b in beats)
     log.info(f"分镜描述 {n} 条（{len(rows)} 个镜头）")
