@@ -116,7 +116,7 @@ def _tts(script: str, out_wav: Path, work: Path) -> float:
 
 
 def run(src: str, work: Path, out: Path, title: str, a: float, b: float,
-        reuse: bool = False) -> dict:
+        reuse: bool = False, segmented: bool = False) -> dict:
     cfg = load()
     work.mkdir(parents=True, exist_ok=True)
     narr = work / "narration.wav"
@@ -144,23 +144,43 @@ def run(src: str, work: Path, out: Path, title: str, a: float, b: float,
 
     panel = _panel(title, chapters, work / "panel.png")
     dur = max(b - a, ndur + 2.0)
+
+    # 分镜文字描述：ASR 分段 → DeepSeek 每段一句，压在左画面原字幕上方。
+    caps: list[tuple[Path, float, float]] = []
+    if segmented:
+        segs = _segments(_sentences(work), a, b)
+        descs = _describe(segs, title, cfg) if segs else []
+        for i, (sg, d) in enumerate(zip(segs, descs)):
+            if not d:
+                continue
+            caps.append((_cap_png(d, work / f"seg_{i:02d}.png"), sg["t0"], sg["t1"]))
+        print(f"分镜描述 {len(caps)} 条")
     bgm = Path("assets/bgm/mixkit/871.mp3")
 
     vf = (
         f"color=c=0x0b0b0b:s=1920x1080:d={dur:.2f}[bg];"
         f"[0:v]scale=-2:1080,setsar=1[left];"
         f"[bg][left]overlay=0:0[b1];"
-        f"[3:v]format=rgba[panel];[b1][panel]overlay=620:0[v];"
+        f"[3:v]format=rgba[panel];[b1][panel]overlay=620:0[v0];"
         f"[0:a]volume=0.15[oa];"
         f"[1:a]adelay=800|800,volume=1.0[na];"
         f"[2:a]volume=0.10,afade=t=in:st=0:d=1.0[ba];"
         f"[oa][na][ba]amix=inputs=3:duration=longest:normalize=0[a]"
     )
+    last = "v0"
+    for i, (_, c0, c1) in enumerate(caps):
+        vf += (f";[{4+i}:v]format=rgba[c{i}];"
+               f"[{last}][c{i}]overlay=x=(608-w)/2:y=610"
+               f":enable='between(t,{c0:.3f},{c1:.3f})'[v{i+1}]")
+        last = f"v{i+1}"
+    vf += f";[{last}]null[v]"
     cmd = ["ffmpeg", "-v", "error", "-y",
            "-ss", f"{a:.2f}", "-t", f"{dur:.2f}", "-i", src,
            "-i", str(narr), "-i", str(bgm),
-           "-loop", "1", "-i", str(panel),
-           "-filter_complex", vf, "-map", "[v]", "-map", "[a]",
+           "-loop", "1", "-i", str(panel)]
+    for png, _, _ in caps:
+        cmd += ["-loop", "1", "-i", str(png)]
+    cmd += ["-filter_complex", vf, "-map", "[v]", "-map", "[a]",
            "-t", f"{dur:.2f}", "-r", "30", "-c:v", "libx264", "-crf", "19",
            "-preset", "veryfast", "-pix_fmt", "yuv420p",
            "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(out)]
@@ -169,6 +189,82 @@ def run(src: str, work: Path, out: Path, title: str, a: float, b: float,
     print(f"成片 {out.name} {info.duration:.1f}s {info.width}x{info.height}")
     return {"out": str(out), "duration": info.duration, "narration": ndur,
             "script": str(work / "script.txt")}
+
+
+
+
+def _segments(sentences: list[dict], a: float, b: float, max_dur: float = 12.0) -> list[dict]:
+    """把 ASR 按时间聚成 8-12 秒一段，段内台词拼起来。"""
+    segs: list[dict] = []
+    for s in sentences:
+        e, st = float(s.get("end") or 0), float(s.get("start") or 0)
+        if e <= a or st >= b:
+            continue
+        t0, t1 = max(a, st) - a, min(b, e) - a
+        txt = str(s.get("text") or "").strip()
+        if not txt:
+            continue
+        if not segs or t1 - segs[-1]["t0"] > max_dur:
+            segs.append({"t0": round(t0, 2), "t1": round(t1, 2), "text": txt})
+        else:
+            segs[-1]["t1"] = round(t1, 2)
+            segs[-1]["text"] += txt
+    return segs
+
+
+SEG_SYSTEM = "你是短剧解说编剧，为横屏中视频写分镜文字描述。只输出 JSON。"
+SEG_TEMPLATE = """下面是短剧《{title}》的 ASR 分段（时间相对切片开头）。
+
+请为每一段写一句 6-12 字的剧情描述，要求：
+1. 说清这一段在发生什么，不要照抄台词；
+2. 不剧透后面的反转，不写“镜头/画面”；
+3. 一句话，不要标点结尾。
+
+分段：
+{rows}
+
+只输出 JSON：{{"segments":[{{"i":1,"desc":"..."}}]}}"""
+
+
+def _describe(segs: list[dict], title: str, cfg) -> list[str]:
+    rows = [f'{i+1}. {s["t0"]:.1f}-{s["t1"]:.1f}s｜{s["text"][:80]}'
+            for i, s in enumerate(segs)]
+    raw = planner._post(cfg.planner, [
+        {"role": "system", "content": SEG_SYSTEM},
+        {"role": "user", "content": SEG_TEMPLATE.format(title=title, rows="\n".join(rows))},
+    ], 0.5)
+    data = planner._parse(raw)
+    got = data.get("segments") if isinstance(data, dict) else None
+    by = {int(x.get("i") or 0): str(x.get("desc") or "").strip()
+          for x in (got or []) if isinstance(x, dict)}
+    return [by.get(i + 1, "")[:14] for i in range(len(segs))]
+
+
+def _cap_png(text: str, dst: Path, width: int = 600) -> Path:
+    fp = _font_path()
+    font = ImageFont.truetype(fp, 34)
+    dummy = Image.new("RGBA", (10, 10))
+    d = ImageDraw.Draw(dummy)
+    lines, cur = [], ""
+    for ch in text:
+        if d.textlength(cur + ch, font=font) > width - 36:
+            lines.append(cur); cur = ch
+        else:
+            cur += ch
+    if cur:
+        lines.append(cur)
+    text_w = max(int(d.textlength(ln, font=font)) for ln in lines) + 40
+    width = max(200, min(width, text_w))
+    h = 34 * len(lines) + 26
+    img = Image.new("RGBA", (width, h), (0, 0, 0, 0))
+    dr = ImageDraw.Draw(img)
+    dr.rounded_rectangle([0, 0, width - 1, h - 1], radius=10, fill=(0, 0, 0, 150))
+    for i, ln in enumerate(lines):
+        w = d.textlength(ln, font=font)
+        dr.text(((width - w) / 2, 10 + i * 34), ln, font=font, fill=(255, 255, 255, 245))
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    img.save(dst)
+    return dst
 
 
 def make_cover(video: str, title: str, dst: Path) -> Path:
@@ -206,8 +302,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--desc", default="")
     ap.add_argument("--tag", action="append", default=[])
     ap.add_argument("--reuse", action="store_true")
+    ap.add_argument("--segmented", action="store_true",
+                    help="按 ASR 分段叠分镜文字描述（在左画面原字幕上方）")
     ns = ap.parse_args(argv)
-    res = run(ns.src, ns.work, ns.out, ns.title, ns.start, ns.end, reuse=ns.reuse)
+    res = run(ns.src, ns.work, ns.out, ns.title, ns.start, ns.end,
+              reuse=ns.reuse, segmented=ns.segmented)
     tags = ns.tag or ["短剧", "解说", "家庭", "悬疑"]
     pkg = package(res["out"], ns.title, ns.desc or ns.title, tags, ns.out.parent)
     res.update(pkg)
