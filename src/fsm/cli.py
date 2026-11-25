@@ -89,6 +89,8 @@ def _build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--reuse", action="store_true")
     sp.add_argument("--segmented", action="store_true",
                     help="按 ASR 分段叠分镜文字描述（原字幕上方）")
+    sp.add_argument("--vertical", action="store_true",
+                    help="9:16 竖屏，无右侧解说框")
     sp.set_defaults(fn=cmd_recap)
 
     sp = sub.add_parser("run", help="处理单个视频")
@@ -169,6 +171,8 @@ def cmd_recap(args) -> int:
         argv.append("--reuse")
     if getattr(args, "segmented", False):
         argv.append("--segmented")
+    if getattr(args, "vertical", False):
+        argv.append("--vertical")
     return recap.main(argv)
 
 

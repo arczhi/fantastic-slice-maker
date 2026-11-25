@@ -116,7 +116,8 @@ def _tts(script: str, out_wav: Path, work: Path) -> float:
 
 
 def run(src: str, work: Path, out: Path, title: str, a: float, b: float,
-        reuse: bool = False, segmented: bool = False) -> dict:
+        reuse: bool = False, segmented: bool = False,
+        vertical: bool = False) -> dict:
     cfg = load()
     work.mkdir(parents=True, exist_ok=True)
     narr = work / "narration.wav"
@@ -153,31 +154,45 @@ def run(src: str, work: Path, out: Path, title: str, a: float, b: float,
         for i, (sg, d) in enumerate(zip(segs, descs)):
             if not d:
                 continue
-            caps.append((_cap_png(d, work / f"seg_{i:02d}.png"), sg["t0"], sg["t1"]))
+            caps.append((_cap_png(d, work / f"seg_{i:02d}.png",
+                                  width=1000 if vertical else 600,
+                                  size=48 if vertical else 34), sg["t0"], sg["t1"]))
         print(f"分镜描述 {len(caps)} 条")
     bgm = Path("assets/bgm/mixkit/871.mp3")
 
-    vf = (
-        f"color=c=0x0b0b0b:s=1920x1080:d={dur:.2f}[bg];"
-        f"[0:v]scale=-2:1080,setsar=1[left];"
-        f"[bg][left]overlay=0:0[b1];"
-        f"[3:v]format=rgba[panel];[b1][panel]overlay=620:0[v0];"
+    if vertical:
+        vf = (
+            f"[0:v]crop=iw:trunc(ih*0.92/2)*2:0:trunc(ih*0.08/2)*2,scale=1080:1920,setsar=1[v0];"
+        )
+        cap_y = 1030
+    else:
+        vf = (
+            f"color=c=0x0b0b0b:s=1920x1080:d={dur:.2f}[bg];"
+            f"[0:v]scale=-2:1080,setsar=1[left];"
+            f"[bg][left]overlay=0:0[b1];"
+            f"[3:v]format=rgba[panel];[b1][panel]overlay=620:0[v0];"
+        )
+        cap_y = 610
+    vf += (
         f"[0:a]volume=0.15[oa];"
         f"[1:a]adelay=800|800,volume=1.0[na];"
         f"[2:a]volume=0.10,afade=t=in:st=0:d=1.0[ba];"
         f"[oa][na][ba]amix=inputs=3:duration=longest:normalize=0[a]"
     )
     last = "v0"
+    base = 3 if vertical else 4
     for i, (_, c0, c1) in enumerate(caps):
-        vf += (f";[{4+i}:v]format=rgba[c{i}];"
-               f"[{last}][c{i}]overlay=x=(608-w)/2:y=610"
+        vf += (f";[{base+i}:v]format=rgba[c{i}];"
+               f"[{last}][c{i}]overlay=x=({1080 if vertical else 608}-w)/2:y={cap_y}"
                f":enable='between(t,{c0:.3f},{c1:.3f})'[v{i+1}]")
         last = f"v{i+1}"
     vf += f";[{last}]null[v]"
     cmd = ["ffmpeg", "-v", "error", "-y",
            "-ss", f"{a:.2f}", "-t", f"{dur:.2f}", "-i", src,
            "-i", str(narr), "-i", str(bgm),
-           "-loop", "1", "-i", str(panel)]
+           ]
+    if not vertical:
+        cmd += ["-loop", "1", "-i", str(panel)]
     for png, _, _ in caps:
         cmd += ["-loop", "1", "-i", str(png)]
     cmd += ["-filter_complex", vf, "-map", "[v]", "-map", "[a]",
@@ -240,9 +255,9 @@ def _describe(segs: list[dict], title: str, cfg) -> list[str]:
     return [by.get(i + 1, "")[:14] for i in range(len(segs))]
 
 
-def _cap_png(text: str, dst: Path, width: int = 600) -> Path:
+def _cap_png(text: str, dst: Path, width: int = 600, size: int = 34) -> Path:
     fp = _font_path()
-    font = ImageFont.truetype(fp, 34)
+    font = ImageFont.truetype(fp, size)
     dummy = Image.new("RGBA", (10, 10))
     d = ImageDraw.Draw(dummy)
     lines, cur = [], ""
@@ -255,13 +270,13 @@ def _cap_png(text: str, dst: Path, width: int = 600) -> Path:
         lines.append(cur)
     text_w = max(int(d.textlength(ln, font=font)) for ln in lines) + 40
     width = max(200, min(width, text_w))
-    h = 34 * len(lines) + 26
+    h = size * len(lines) + 26
     img = Image.new("RGBA", (width, h), (0, 0, 0, 0))
     dr = ImageDraw.Draw(img)
     dr.rounded_rectangle([0, 0, width - 1, h - 1], radius=10, fill=(0, 0, 0, 150))
     for i, ln in enumerate(lines):
         w = d.textlength(ln, font=font)
-        dr.text(((width - w) / 2, 10 + i * 34), ln, font=font, fill=(255, 255, 255, 245))
+        dr.text(((width - w) / 2, 10 + i * size), ln, font=font, fill=(255, 255, 255, 245))
     dst.parent.mkdir(parents=True, exist_ok=True)
     img.save(dst)
     return dst
@@ -303,10 +318,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--tag", action="append", default=[])
     ap.add_argument("--reuse", action="store_true")
     ap.add_argument("--segmented", action="store_true",
-                    help="按 ASR 分段叠分镜文字描述（在左画面原字幕上方）")
+                    help="按 ASR 分段叠分镜文字描述（在原字幕上方）")
+    ap.add_argument("--vertical", action="store_true",
+                    help="9:16 竖屏，无右侧解说框（西瓜竖版）")
     ns = ap.parse_args(argv)
     res = run(ns.src, ns.work, ns.out, ns.title, ns.start, ns.end,
-              reuse=ns.reuse, segmented=ns.segmented)
+              reuse=ns.reuse, segmented=ns.segmented, vertical=ns.vertical)
     tags = ns.tag or ["短剧", "解说", "家庭", "悬疑"]
     pkg = package(res["out"], ns.title, ns.desc or ns.title, tags, ns.out.parent)
     res.update(pkg)
