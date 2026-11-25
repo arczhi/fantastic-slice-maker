@@ -91,6 +91,8 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="按 ASR 分段叠分镜文字描述（原字幕上方）")
     sp.add_argument("--horizontal", action="store_true",
                     help="16:9 横屏+右侧解说框；默认 9:16 竖屏")
+    sp.add_argument("--voiceover", action="store_true",
+                    help="加 TTS 解说；默认不加（原声+BGM）")
     sp.set_defaults(fn=cmd_recap)
 
     sp = sub.add_parser("run", help="处理单个视频")
@@ -173,6 +175,8 @@ def cmd_recap(args) -> int:
         argv.append("--segmented")
     if getattr(args, "horizontal", False):
         argv.append("--horizontal")
+    if getattr(args, "voiceover", False):
+        argv.append("--voiceover")
     return recap.main(argv)
 
 
@@ -399,6 +403,7 @@ def main(argv: list[str] | None = None) -> int:
     handler = {
         "run": cmd_run, "batch": cmd_batch,
         "watch": cmd_watch, "doctor": cmd_doctor, "bgm": cmd_bgm,
+        "recap": cmd_recap,
     }[args.cmd]
     return handler(args)
 

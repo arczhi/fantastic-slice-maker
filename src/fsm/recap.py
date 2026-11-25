@@ -117,15 +117,15 @@ def _tts(script: str, out_wav: Path, work: Path) -> float:
 
 def run(src: str, work: Path, out: Path, title: str, a: float, b: float,
         reuse: bool = False, segmented: bool = False,
-        vertical: bool = True) -> dict:
+        vertical: bool = True, voiceover: bool = False) -> dict:
     cfg = load()
     work.mkdir(parents=True, exist_ok=True)
     narr = work / "narration.wav"
-    if reuse and (work / "script.txt").exists() and narr.exists():
+    if reuse and (work / "script.txt").exists() and (not voiceover or narr.exists()):
         script = (work / "script.txt").read_text(encoding="utf-8")
         chapters = json.loads((work / "chapters.json").read_text(encoding="utf-8"))
-        ndur = ffmpeg.duration_of(str(narr))
-        print(f"复用解说 {len(script)} 字 / {ndur:.1f}s")
+        ndur = ffmpeg.duration_of(str(narr)) if voiceover else 0.0
+        print(f"复用脚本 {len(script)} 字 / 配音 {'%.1fs' % ndur if voiceover else '关闭'}")
     else:
         sentences = _sentences(work)
         lines = _lines_in(sentences, a, b)
@@ -140,11 +140,15 @@ def run(src: str, work: Path, out: Path, title: str, a: float, b: float,
             raise SystemExit(f"解说稿太短：{script[:80]}")
         (work / "script.txt").write_text(script, encoding="utf-8")
         (work / "chapters.json").write_text(json.dumps(chapters, ensure_ascii=False), encoding="utf-8")
-        ndur = _tts(script, narr, work)
-        print(f"解说 {len(script)} 字 / {ndur:.1f}s")
+        if voiceover:
+            ndur = _tts(script, narr, work)
+            print(f"解说 {len(script)} 字 / {ndur:.1f}s")
+        else:
+            ndur = 0.0
+            print(f"无配音（原声+BGM）：脚本 {len(script)} 字仅用于章节/分段")
 
     panel = _panel(title, chapters, work / "panel.png")
-    dur = max(b - a, ndur + 2.0)
+    dur = max(b - a, ndur + 2.0) if ndur else (b - a)
     ov = cfg.render.overlay
     wm = (ov_mod._watermark_png(ov.watermark_text, ov, work / "wm.png")
           if ov.watermark_enabled else None)
@@ -163,34 +167,56 @@ def run(src: str, work: Path, out: Path, title: str, a: float, b: float,
         print(f"分镜描述 {len(caps)} 条")
     bgm = Path("assets/bgm/mixkit/871.mp3")
 
+    idx = 1
+    narr_idx = None
+    if voiceover:
+        narr_idx = idx
+        idx += 1
+    bgm_idx = idx
+    idx += 1
+    panel_idx = None
+    if not vertical:
+        panel_idx = idx
+        idx += 1
+    cap_base = idx
+
     if vertical:
-        vf = (
-            f"[0:v]crop=iw:trunc(ih*0.92/2)*2:0:trunc(ih*0.08/2)*2,scale=1080:1920,setsar=1[v0];"
-        )
+        vf = (f"[0:v]crop=iw:trunc(ih*0.92/2)*2:0:trunc(ih*0.08/2)*2,"
+              f"scale=1080:1920,setsar=1[v0];")
         cap_y = 1030
     else:
         vf = (
             f"color=c=0x0b0b0b:s=1920x1080:d={dur:.2f}[bg];"
-            f"[0:v]scale=-2:1080,setsar=1[left];"
+            f"[0:v]crop=iw:trunc(ih*0.92/2)*2:0:trunc(ih*0.08/2)*2,scale=-2:1080,setsar=1[left];"
             f"[bg][left]overlay=0:0[b1];"
-            f"[3:v]format=rgba[panel];[b1][panel]overlay=620:0[v0];"
+            f"[{panel_idx}:v]format=rgba[panel];[b1][panel]overlay=620:0[v0];"
         )
         cap_y = 610
-    vf += (
-        f"[0:a]volume=0.15[oa];"
-        f"[1:a]adelay=800|800,volume=1.0[na];"
-        f"[2:a]volume=0.10,afade=t=in:st=0:d=1.0[ba];"
-        f"[oa][na][ba]amix=inputs=3:duration=longest:normalize=0[a]"
-    )
+
+    if voiceover:
+        vf += (
+            f"[0:a]volume=0.15[oa];"
+            f"[{narr_idx}:a]adelay=800|800,volume=1.0[na];"
+            f"[{bgm_idx}:a]volume=0.10,afade=t=in:st=0:d=1.0[ba];"
+            f"[oa][na][ba]amix=inputs=3:duration=longest:normalize=0[a]"
+        )
+    else:
+        # 不加解说：原声保持正常音量，BGM 只做很轻的底
+        vf += (
+            f"[0:a]volume=1.0[oa];"
+            f"[{bgm_idx}:a]volume=0.10,afade=t=in:st=0:d=1.0[ba];"
+            f"[oa][ba]amix=inputs=2:duration=longest:normalize=0[a]"
+        )
+
     last = "v0"
-    base = 3 if vertical else 4
     for i, (_, c0, c1) in enumerate(caps):
-        vf += (f";[{base+i}:v]format=rgba[c{i}];"
+        vf += (f";[{cap_base+i}:v]format=rgba[c{i}];"
                f"[{last}][c{i}]overlay=x=({1080 if vertical else 608}-w)/2:y={cap_y}"
                f":enable='between(t,{c0:.3f},{c1:.3f})'[v{i+1}]")
         last = f"v{i+1}"
+
     if wm:
-        wm_idx = 3 + (0 if vertical else 1) + len(caps)
+        wm_idx = cap_base + len(caps)
         sec = max(2.0, float(ov.watermark_rotate_seconds))
         vf += (f";[{wm_idx}:v]format=rgba,"
                f"rotate=2*PI*t/{sec:.3f}:c=none:ow=iw:oh=ih[wmr];"
@@ -198,10 +224,12 @@ def run(src: str, work: Path, out: Path, title: str, a: float, b: float,
                f"[vwm]")
         last = "vwm"
     vf += f";[{last}]null[v]"
+
     cmd = ["ffmpeg", "-v", "error", "-y",
-           "-ss", f"{a:.2f}", "-t", f"{dur:.2f}", "-i", src,
-           "-i", str(narr), "-i", str(bgm),
-           ]
+           "-ss", f"{a:.2f}", "-t", f"{dur:.2f}", "-i", src]
+    if voiceover:
+        cmd += ["-i", str(narr)]
+    cmd += ["-i", str(bgm)]
     if not vertical:
         cmd += ["-loop", "1", "-i", str(panel)]
     for png, _, _ in caps:
@@ -209,9 +237,9 @@ def run(src: str, work: Path, out: Path, title: str, a: float, b: float,
     if wm:
         cmd += ["-loop", "1", "-i", str(wm)]
     cmd += ["-filter_complex", vf, "-map", "[v]", "-map", "[a]",
-           "-t", f"{dur:.2f}", "-r", "30", "-c:v", "libx264", "-crf", "19",
-           "-preset", "veryfast", "-pix_fmt", "yuv420p",
-           "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(out)]
+            "-t", f"{dur:.2f}", "-r", "30", "-c:v", "libx264", "-crf", "19",
+            "-preset", "veryfast", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(out)]
     ffmpeg.run(cmd, timeout=1800)
     info = ffmpeg.probe(str(out))
     print(f"成片 {out.name} {info.duration:.1f}s {info.width}x{info.height}")
@@ -334,10 +362,12 @@ def main(argv: list[str] | None = None) -> int:
                     help="按 ASR 分段叠分镜文字描述（在原字幕上方）")
     ap.add_argument("--horizontal", action="store_true",
                     help="16:9 横屏+右侧解说框（默认是 9:16 竖屏）")
+    ap.add_argument("--voiceover", action="store_true",
+                    help="加 TTS 解说（默认不加，只保留原声+BGM）")
     ns = ap.parse_args(argv)
     res = run(ns.src, ns.work, ns.out, ns.title, ns.start, ns.end,
               reuse=ns.reuse, segmented=ns.segmented,
-              vertical=not ns.horizontal)
+              vertical=not ns.horizontal, voiceover=ns.voiceover)
     tags = ns.tag or ["短剧", "解说", "家庭", "悬疑"]
     pkg = package(res["out"], ns.title, ns.desc or ns.title, tags, ns.out.parent)
     res.update(pkg)
