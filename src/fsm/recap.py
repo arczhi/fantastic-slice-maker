@@ -1,4 +1,4 @@
-"""横屏短剧解说（西瓜向）：16:9、3-5 分钟，竖屏居左 + 右侧解说栏。
+"""解说式长片段二创（短剧小当家第二类视频）：默认 9:16 竖屏、3-5 分钟。
 
 第一版只做验证片：
 - 台词取自已缓存 timeline.json（ASR sentences）；
@@ -27,7 +27,7 @@ VOICE = "ryan"
 INSTRUCT = ("用清楚、稳的中年男声讲短剧剧情，语速正常偏快，句尾收住，"
             "不要播音腔，不要压低嗓子，不要拖长音。")
 
-SYSTEM = "你是短剧解说编剧，为西瓜视频写横屏中视频解说。只输出 JSON。"
+SYSTEM = "你是短剧解说编剧，为快手写竖屏长片段解说二创。只输出 JSON。"
 TEMPLATE = """下面是短剧《{title}》第 {a:.0f}-{b:.0f} 秒的台词。
 
 请写一条 1000-1200 字的横屏解说稿（约 4 分钟），要求：
@@ -312,7 +312,7 @@ def package(video: str, title: str, desc: str, tags: list[str], out_dir: Path) -
     cover = make_cover(video, title, out_dir / f"{stem}.cover.jpg")
     meta = {"video": str(Path(video).resolve()), "title": title, "desc": desc,
             "tags": tags, "cover": str(cover.resolve()),
-            "platform": "xigua", "note": "西瓜网页创作平台已并入抖音，当前走西瓜 App 手动发布"}
+            "platform": "kuaishou", "note": "解说式长片段二创（快手第二类视频），成片+封面+发布信息"}
     p = out_dir / f"{stem}.publish.json"
     p.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     return {"meta": str(p), "cover": str(cover)}
@@ -320,7 +320,7 @@ def package(video: str, title: str, desc: str, tags: list[str], out_dir: Path) -
 
 def main(argv: list[str] | None = None) -> int:
     import argparse
-    ap = argparse.ArgumentParser(prog="fsm recap", description="横屏短剧解说（西瓜半自动）")
+    ap = argparse.ArgumentParser(prog="fsm recap", description="解说式长片段二创（竖屏 3-5 分钟）")
     ap.add_argument("src")
     ap.add_argument("work", type=Path)
     ap.add_argument("out", type=Path)

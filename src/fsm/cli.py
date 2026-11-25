@@ -77,7 +77,7 @@ def _build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--nice", type=int, default=None,
                         help="子进程降优先级幅度（默认 5，0 表示不降）")
 
-    sp = sub.add_parser("recap", help="横屏短剧解说（西瓜半自动：成片+封面+发布信息）")
+    sp = sub.add_parser("recap", help="解说式长片段二创（竖屏 3-5 分钟：成片+封面+发布信息）")
     sp.add_argument("src")
     sp.add_argument("work", type=Path)
     sp.add_argument("out", type=Path)
