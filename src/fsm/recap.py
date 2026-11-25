@@ -117,7 +117,7 @@ def _tts(script: str, out_wav: Path, work: Path) -> float:
 
 def run(src: str, work: Path, out: Path, title: str, a: float, b: float,
         reuse: bool = False, segmented: bool = False,
-        vertical: bool = False) -> dict:
+        vertical: bool = True) -> dict:
     cfg = load()
     work.mkdir(parents=True, exist_ok=True)
     narr = work / "narration.wav"
@@ -319,11 +319,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--reuse", action="store_true")
     ap.add_argument("--segmented", action="store_true",
                     help="按 ASR 分段叠分镜文字描述（在原字幕上方）")
-    ap.add_argument("--vertical", action="store_true",
-                    help="9:16 竖屏，无右侧解说框（西瓜竖版）")
+    ap.add_argument("--horizontal", action="store_true",
+                    help="16:9 横屏+右侧解说框（默认是 9:16 竖屏）")
     ns = ap.parse_args(argv)
     res = run(ns.src, ns.work, ns.out, ns.title, ns.start, ns.end,
-              reuse=ns.reuse, segmented=ns.segmented, vertical=ns.vertical)
+              reuse=ns.reuse, segmented=ns.segmented,
+              vertical=not ns.horizontal)
     tags = ns.tag or ["短剧", "解说", "家庭", "悬疑"]
     pkg = package(res["out"], ns.title, ns.desc or ns.title, tags, ns.out.parent)
     res.update(pkg)
