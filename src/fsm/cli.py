@@ -77,6 +77,18 @@ def _build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--nice", type=int, default=None,
                         help="子进程降优先级幅度（默认 5，0 表示不降）")
 
+    sp = sub.add_parser("recap", help="横屏短剧解说（西瓜半自动：成片+封面+发布信息）")
+    sp.add_argument("src")
+    sp.add_argument("work", type=Path)
+    sp.add_argument("out", type=Path)
+    sp.add_argument("--title", required=True)
+    sp.add_argument("--start", type=float, required=True)
+    sp.add_argument("--end", type=float, required=True)
+    sp.add_argument("--desc", default="")
+    sp.add_argument("--tag", action="append", default=[])
+    sp.add_argument("--reuse", action="store_true")
+    sp.set_defaults(fn=cmd_recap)
+
     sp = sub.add_parser("run", help="处理单个视频")
     sp.add_argument("video")
     sp.add_argument("--delogo", action="append", default=[], metavar="X,Y,W,H",
@@ -141,6 +153,19 @@ def _setup(args) -> None:
     log_dir = Path(cfg.paths.log)
     ensure_dir(log_dir)
     setup_logging(log_dir / "fsm.jsonl", level=20 if args.verbose else 20)
+
+
+def cmd_recap(args) -> int:
+    from . import recap
+    argv = [args.src, str(args.work), str(args.out), "--title", args.title,
+            "--start", str(args.start), "--end", str(args.end)]
+    if args.desc:
+        argv += ["--desc", args.desc]
+    for t in args.tag or []:
+        argv += ["--tag", t]
+    if args.reuse:
+        argv.append("--reuse")
+    return recap.main(argv)
 
 
 def cmd_run(args) -> int:
