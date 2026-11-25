@@ -17,7 +17,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
-from . import ffmpeg, planner
+from . import ffmpeg, overlay as ov_mod, planner
 from .config import load
 from .subtitle import _font_path
 
@@ -145,6 +145,9 @@ def run(src: str, work: Path, out: Path, title: str, a: float, b: float,
 
     panel = _panel(title, chapters, work / "panel.png")
     dur = max(b - a, ndur + 2.0)
+    ov = cfg.render.overlay
+    wm = (ov_mod._watermark_png(ov.watermark_text, ov, work / "wm.png")
+          if ov.watermark_enabled else None)
 
     # 分镜文字描述：ASR 分段 → DeepSeek 每段一句，压在左画面原字幕上方。
     caps: list[tuple[Path, float, float]] = []
@@ -186,6 +189,14 @@ def run(src: str, work: Path, out: Path, title: str, a: float, b: float,
                f"[{last}][c{i}]overlay=x=({1080 if vertical else 608}-w)/2:y={cap_y}"
                f":enable='between(t,{c0:.3f},{c1:.3f})'[v{i+1}]")
         last = f"v{i+1}"
+    if wm:
+        wm_idx = 3 + (0 if vertical else 1) + len(caps)
+        sec = max(2.0, float(ov.watermark_rotate_seconds))
+        vf += (f";[{wm_idx}:v]format=rgba,"
+               f"rotate=2*PI*t/{sec:.3f}:c=none:ow=iw:oh=ih[wmr];"
+               f"[{last}][wmr]overlay=x=W-w-{ov.watermark_right}:y={ov.watermark_top}"
+               f"[vwm]")
+        last = "vwm"
     vf += f";[{last}]null[v]"
     cmd = ["ffmpeg", "-v", "error", "-y",
            "-ss", f"{a:.2f}", "-t", f"{dur:.2f}", "-i", src,
@@ -195,6 +206,8 @@ def run(src: str, work: Path, out: Path, title: str, a: float, b: float,
         cmd += ["-loop", "1", "-i", str(panel)]
     for png, _, _ in caps:
         cmd += ["-loop", "1", "-i", str(png)]
+    if wm:
+        cmd += ["-loop", "1", "-i", str(wm)]
     cmd += ["-filter_complex", vf, "-map", "[v]", "-map", "[a]",
            "-t", f"{dur:.2f}", "-r", "30", "-c:v", "libx264", "-crf", "19",
            "-preset", "veryfast", "-pix_fmt", "yuv420p",
