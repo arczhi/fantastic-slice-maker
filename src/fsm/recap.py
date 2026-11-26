@@ -163,8 +163,9 @@ def run(src: str, work: Path, out: Path, title: str, a: float, b: float,
             if not d:
                 continue
             caps.append((_cap_png(d, work / f"seg_{i:02d}.png",
-                                  width=1000 if vertical else 600,
-                                  size=48 if vertical else 34), sg["t0"], sg["t1"]))
+                                  width=1000 if vertical else (760 if fullframe else 600),
+                                  size=48 if vertical else (40 if fullframe else 34)),
+                         sg["t0"], sg["t1"]))
         print(f"分镜描述 {len(caps)} 条")
     bgm = Path("assets/bgm/mixkit/871.mp3")
 
@@ -218,8 +219,12 @@ def run(src: str, work: Path, out: Path, title: str, a: float, b: float,
 
     last = "v0"
     for i, (_, c0, c1) in enumerate(caps):
+        if fullframe:
+            pos = "x=W-w-80:y=(H-h)/2"
+        else:
+            pos = f"x=({1080 if vertical else 608}-w)/2:y={cap_y}"
         vf += (f";[{cap_base+i}:v]format=rgba[c{i}];"
-               f"[{last}][c{i}]overlay=x=({1080 if vertical else 608}-w)/2:y={cap_y}"
+               f"[{last}][c{i}]overlay={pos}"
                f":enable='between(t,{c0:.3f},{c1:.3f})'[v{i+1}]")
         last = f"v{i+1}"
 
