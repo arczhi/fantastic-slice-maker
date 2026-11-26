@@ -93,6 +93,8 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="16:9 横屏+右侧解说框；默认 9:16 竖屏")
     sp.add_argument("--voiceover", action="store_true",
                     help="加 TTS 解说；默认不加（原声+BGM）")
+    sp.add_argument("--fullframe", action="store_true",
+                    help="原生 16:9 源铺满画面，无解说框")
     sp.set_defaults(fn=cmd_recap)
 
     sp = sub.add_parser("run", help="处理单个视频")
@@ -177,6 +179,8 @@ def cmd_recap(args) -> int:
         argv.append("--horizontal")
     if getattr(args, "voiceover", False):
         argv.append("--voiceover")
+    if getattr(args, "fullframe", False):
+        argv.append("--fullframe")
     return recap.main(argv)
 
 

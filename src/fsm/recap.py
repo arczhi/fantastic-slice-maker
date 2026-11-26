@@ -117,7 +117,8 @@ def _tts(script: str, out_wav: Path, work: Path) -> float:
 
 def run(src: str, work: Path, out: Path, title: str, a: float, b: float,
         reuse: bool = False, segmented: bool = False,
-        vertical: bool = True, voiceover: bool = False) -> dict:
+        vertical: bool = True, voiceover: bool = False,
+        fullframe: bool = False) -> dict:
     cfg = load()
     work.mkdir(parents=True, exist_ok=True)
     narr = work / "narration.wav"
@@ -175,12 +176,19 @@ def run(src: str, work: Path, out: Path, title: str, a: float, b: float,
     bgm_idx = idx
     idx += 1
     panel_idx = None
-    if not vertical:
+    if not vertical and not fullframe:
         panel_idx = idx
         idx += 1
     cap_base = idx
 
-    if vertical:
+    if fullframe:
+        # 原生 16:9 源：直接铺满 1920x1080，无解说框
+        # 原生 16:9：去掉顶部/底部黑边和右上角平台台标，再铺满
+        vf = ("[0:v]crop=1920:1040:0:20,"
+              "delogo=x=1490:y=8:w=400:h=110,"
+              "scale=1920:1080,setsar=1[v0];")
+        cap_y = 880
+    elif vertical:
         vf = (f"[0:v]crop=iw:trunc(ih*0.92/2)*2:0:trunc(ih*0.08/2)*2,"
               f"scale=1080:1920,setsar=1[v0];")
         cap_y = 1030
@@ -230,7 +238,7 @@ def run(src: str, work: Path, out: Path, title: str, a: float, b: float,
     if voiceover:
         cmd += ["-i", str(narr)]
     cmd += ["-i", str(bgm)]
-    if not vertical:
+    if not vertical and not fullframe:
         cmd += ["-loop", "1", "-i", str(panel)]
     for png, _, _ in caps:
         cmd += ["-loop", "1", "-i", str(png)]
@@ -364,10 +372,13 @@ def main(argv: list[str] | None = None) -> int:
                     help="16:9 横屏+右侧解说框（默认是 9:16 竖屏）")
     ap.add_argument("--voiceover", action="store_true",
                     help="加 TTS 解说（默认不加，只保留原声+BGM）")
+    ap.add_argument("--fullframe", action="store_true",
+                    help="原生 16:9 源：铺满 1920x1080，无解说框")
     ns = ap.parse_args(argv)
     res = run(ns.src, ns.work, ns.out, ns.title, ns.start, ns.end,
               reuse=ns.reuse, segmented=ns.segmented,
-              vertical=not ns.horizontal, voiceover=ns.voiceover)
+              vertical=not ns.horizontal, voiceover=ns.voiceover,
+              fullframe=ns.fullframe)
     tags = ns.tag or ["短剧", "解说", "家庭", "悬疑"]
     pkg = package(res["out"], ns.title, ns.desc or ns.title, tags, ns.out.parent)
     res.update(pkg)
