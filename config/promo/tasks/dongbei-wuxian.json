@@ -1,0 +1,22 @@
+{
+  "id": "dongbei-wuxian",
+  "name": "东北五仙之传香人",
+  "platform": "kuaishou",
+  "plan": "星火计划",
+  "type": "影剧综 / 动漫 / 视频",
+  "split": {"ad": 0.95, "income": 0.77},
+  "revenue_until": "2027-10-20",
+  "stats": {"works": 48000, "participants": 22000, "max_income": 48.71},
+  "requirements": [
+    "视频内容与星火小程序主题相关，避免低质拼接、生硬植入",
+    "内容积极向上，禁止恶俗、违背公序良俗",
+    "不得含虚假信息、诱导点击、损害品牌",
+    "必须原创，拒绝拼接、搬运、虚假互动"
+  ],
+  "format": {"ratio": "9:16", "duration_s": [30, 90], "max_mb": 8000},
+  "materials_dir": "~/Downloads/星火素材/东北五仙",
+  "deliverable_dir": "out/promo/dongbei-wuxian",
+  "publish_entry": "快手 App → 创作者中心 → 全部服务 → 变现任务 → 星火计划 → 任务详情 → 发布作品去赚钱",
+  "status": "intake",
+  "notes": "发布必须从任务详情页的「发布作品去赚钱」进入，不能从相册直接发，否则不挂任务、不计分成。"
+}
